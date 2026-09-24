@@ -592,7 +592,7 @@ impl Broker {
         ]);
         crashpoint::maybe_crash(REQUEST_EXECUTED);
         let digest = request.digest().unwrap_or_default();
-        let _ = self.audit.emit(
+        if self.audit.emit(
             "execution_start",
             fields(
                 self.policy.version(),
@@ -608,7 +608,9 @@ impl Broker {
                     error: None,
                 },
             ),
-        );
+        ).is_err() {
+            return BrokerDecision::deny("denied_audit_unavailable", self.policy.version());
+        }
         if !flow_id.is_empty() {
             let _ = self.approvals.mark_executing(flow_id);
         }
