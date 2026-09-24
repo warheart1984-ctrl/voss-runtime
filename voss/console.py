@@ -540,13 +540,13 @@ class ConsoleClient:
                     return
                 with self._io_lock:
                     self._expect_seq = expected
-                    if kind == "vote":
-                        self._dispatch(self._on_vote, msg.get("flow_id", ""),
-                                       msg.get("decision", "DENY"),
-                                       msg.get("approver_ref", ""))
-                    else:
-                        self._dispatch(self._on_terminate,
-                                       msg.get("reason", "operator"))
+                if kind == "vote":
+                    self._dispatch(self._on_vote, msg.get("flow_id", ""),
+                                   msg.get("decision", "DENY"),
+                                   msg.get("approver_ref", ""))
+                elif kind == "terminate":
+                    self._dispatch(self._on_terminate,
+                                   msg.get("reason", "operator"))
                 elif kind == "busy":
                     raise ConsoleAnomaly("console busy")
                 elif kind != "ack":

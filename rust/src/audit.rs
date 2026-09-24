@@ -108,9 +108,9 @@ impl AuditLog {
             .append(true)
             .open(&path)
             .map_err(|error| AuditUnavailableError::new(format!("cannot open audit log: {error}")))?;
-        Ok(Self {
-            path,
-            keyring,
+        let audit = Self {
+            path: path.clone(),
+            keyring: keyring.clone(),
             schema: schema.to_string(),
             genesis: genesis.to_string(),
             state: Mutex::new(AuditState {
@@ -118,7 +118,11 @@ impl AuditLog {
                 last_hash,
                 closed: false,
             }),
-        })
+        };
+        if !audit.verify_integrity() {
+            return Err(AuditUnavailableError::new(format!("audit log integrity verification failed for {}", path.display())));
+        }
+        Ok(audit)
     }
 
     pub fn path(&self) -> &Path {
@@ -184,12 +188,14 @@ impl AuditLog {
         ]);
         let mut encoded = canonical_bytes(&line).map_err(unavailable)?;
         encoded.push(b'\n');
-        state.file.write_all(&encoded).map_err(|error| {
-            AuditUnavailableError::new(format!("cannot append audit record: {error}"))
-        })?;
-        state.file.flush().map_err(|error| {
-            AuditUnavailableError::new(format!("cannot flush audit record: {error}"))
-        })?;
+        if let Err(e) = state.file.write_all(&encoded) {
+            state.closed = true;
+            return Err(AuditUnavailableError::new(format!("cannot append audit record: {e}")));
+        }
+        if let Err(e) = state.file.flush() {
+            state.closed = true;
+            return Err(AuditUnavailableError::new(format!("cannot flush audit record: {e}")));
+        }
         state.last_hash = chain_hash;
         Ok(line)
     }

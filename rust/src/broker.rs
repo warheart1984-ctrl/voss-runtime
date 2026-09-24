@@ -105,6 +105,7 @@ pub fn coarse_reason_code(full: &str) -> &'static str {
 pub trait HealthProvider: Send + Sync {
     fn watchdog_health_ok(&self) -> bool;
     fn watchdog_accepts_work(&self, worker_id: &str) -> bool;
+    fn relay_ok(&self) -> bool { true }
 }
 
 struct BrokerState {
@@ -391,6 +392,9 @@ impl Broker {
         if !self.health.watchdog_accepts_work(worker_id) {
             problems.push("watchdog-suspended");
         }
+        if !self.health.relay_ok() {
+            problems.push("relay-unavailable");
+        }
         if problems.is_empty() {
             return None;
         }
@@ -501,7 +505,7 @@ impl Broker {
     }
 
     fn store(&self, state: &mut BrokerState, capability: Capability) -> Capability {
-        let _ = self.audit.emit(
+        if self.audit.emit(
             "capability_issued",
             AuditFields {
                 worker_id: Some(capability.principal.clone()),
@@ -521,7 +525,10 @@ impl Broker {
                 approver_ref: Some(capability.approval_ref.clone()),
                 ..AuditFields::default()
             },
-        );
+        ).is_err() {
+            // fail-closed: do not store capability if audit is unavailable
+            return capability;
+        }
         state.caps.insert(capability.cap_id.clone(), capability.clone());
         wal_emit(&self.wal, "capability_issued", capability_record(&capability));
         crashpoint::maybe_crash(CAPABILITY_ISSUED);
@@ -592,7 +599,7 @@ impl Broker {
         ]);
         crashpoint::maybe_crash(REQUEST_EXECUTED);
         let digest = request.digest().unwrap_or_default();
-        let _ = self.audit.emit(
+        if self.audit.emit(
             "execution_start",
             fields(
                 self.policy.version(),
@@ -608,7 +615,12 @@ impl Broker {
                     error: None,
                 },
             ),
-        );
+        ).is_err() {
+            return BrokerDecision::deny("denied_audit_unavailable", self.policy.version());
+        }
+        if !self.audit.healthy() || !self.wal.healthy() {
+            return BrokerDecision::deny("denied_log_unavailable", self.policy.version());
+        }
         if !flow_id.is_empty() {
             let _ = self.approvals.mark_executing(flow_id);
         }

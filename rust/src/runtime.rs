@@ -68,6 +68,7 @@ struct Counters {
 
 struct LiveControls {
     watchdog: Weak<Watchdog>,
+    relay_ok: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl HealthProvider for LiveControls {
@@ -81,6 +82,10 @@ impl HealthProvider for LiveControls {
         self.watchdog
             .upgrade()
             .is_some_and(|watchdog| watchdog.accepts_work(worker_id))
+    }
+
+    fn relay_ok(&self) -> bool {
+        self.relay_ok.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -104,6 +109,7 @@ pub struct VossRuntime {
     link: Mutex<Option<WorkerLink>>,
     bootstrap_path: Mutex<Option<PathBuf>>,
     relay: Mutex<Option<Arc<AuditRelayClient>>>,
+    relay_ok: std::sync::Arc<std::sync::atomic::AtomicBool>,
     guard: Arc<Mutex<Option<Arc<WatchGuardLink>>>>,
     worker_pid: Arc<Mutex<Option<u32>>>,
     worker_job: Mutex<Option<WorkerJob>>,
@@ -153,8 +159,10 @@ impl VossRuntime {
         let tool_names: Vec<String> = tools.names().into_iter().map(str::to_string).collect();
         let normalizer = RequestNormalizer::new(&workspace_root, tool_names.clone())?;
         let watchdog = Arc::new(Watchdog::new());
+        let relay_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let controls = Arc::new(LiveControls {
             watchdog: Arc::downgrade(&watchdog),
+            relay_ok: Arc::clone(&relay_ok),
         });
         let broker = Arc::new(Broker::new(
             engine,
@@ -241,6 +249,7 @@ impl VossRuntime {
             link: Mutex::new(None),
             bootstrap_path: Mutex::new(None),
             relay: Mutex::new(None),
+            relay_ok,
             guard: guard_for_health,
             worker_pid: Arc::new(Mutex::new(None)),
             worker_job: Mutex::new(None),
@@ -757,6 +766,7 @@ impl VossRuntime {
         });
         client.start();
         *self.relay.lock().expect("relay") = Some(client);
+        self.relay_ok.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn audit_summary(&self) -> Json {
