@@ -137,6 +137,48 @@ fn outbox_count(dir: &Path) -> usize {
 }
 
 #[test]
+fn replayed_hello_nonce_is_refused() {
+    let root = std::env::temp_dir().join(format!("voss-console-replay-{}", new_id("")));
+    let proc = start_console(&root, Some("approve"), "0.2");
+    let mut first = TcpStream::connect(("127.0.0.1", proc.port)).unwrap();
+    first.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    first.set_nodelay(true).unwrap();
+    let challenge = relay::read_frame(&mut first).unwrap();
+    assert_eq!(text(&challenge, "type"), "challenge", "{challenge:?}");
+    let challenge_value = text(&challenge, "challenge");
+    let nonce = new_id("console-");
+    let hello = Json::object([
+        ("challenge", Json::string(challenge_value.clone())),
+        ("mac", Json::string(console::sign_console_hello(&proc.key, &nonce, &challenge_value))),
+        ("nonce", Json::string(nonce)),
+        ("type", Json::string("hello")),
+        ("version", Json::string(console::CONSOLE_PROTOCOL)),
+    ]);
+    let bytes = relay::frame(&hello).unwrap();
+    first.write_all(&bytes).unwrap();
+    let reply = relay::read_frame(&mut first).unwrap();
+    assert_eq!(text(&reply, "type"), "hello_ok");
+    drop(first);
+    thread::sleep(Duration::from_millis(200));
+    let mut replay = TcpStream::connect(("127.0.0.1", proc.port)).unwrap();
+    replay.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    replay.set_nodelay(true).unwrap();
+    let _ = relay::read_frame(&mut replay).unwrap();
+    replay.write_all(&bytes).unwrap();
+    let reply2 = relay::read_frame(&mut replay).unwrap();
+    assert_eq!(text(&reply2, "status"), "error");
+    assert_eq!(text(&reply2, "reason"), "denied_console_auth");
+    drop(replay);
+    let control = fs::read_to_string(proc.store.join("console-control.jsonl")).unwrap();
+    let events: Vec<String> = control
+        .lines()
+        .filter_map(|line| loads_strict(line).ok())
+        .map(|rec| text(&rec, "event"))
+        .collect();
+    assert!(events.iter().any(|e| e == "console_denied_hello"), "{events:?}");
+}
+
+#[test]
 fn auto_approve_from_console_executes_effect() {
     let root = std::env::temp_dir().join(format!("voss-console-approve-{}", new_id("")));
     let proc = start_console(&root, Some("approve"), "0.2");
@@ -261,7 +303,10 @@ fn unauthenticated_probe_refused_and_logged() {
     let proc = start_console(&root, Some("approve"), "0.2");
     let mut probe = TcpStream::connect(("127.0.0.1", proc.port)).unwrap();
     probe.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let challenge = relay::read_frame(&mut probe).unwrap();
+    assert_eq!(text(&challenge, "type"), "challenge", "{challenge:?}");
     let hello = Json::object([
+        ("challenge", Json::string(text(&challenge, "challenge"))),
         ("mac", Json::string("0".repeat(64))),
         ("nonce", Json::string(new_id("p-"))),
         ("type", Json::string("hello")),

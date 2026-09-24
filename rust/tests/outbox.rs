@@ -306,7 +306,10 @@ fn unauthenticated_probe_refused_and_logged() {
     let proc = start_outbox(&root, false, false);
     let mut probe = TcpStream::connect(("127.0.0.1", proc.port)).unwrap();
     probe.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let challenge = relay::read_frame(&mut probe).unwrap();
+    assert_eq!(text(&challenge, "type"), "challenge", "{challenge:?}");
     let hello = Json::object([
+        ("challenge", Json::string(text(&challenge, "challenge"))),
         ("mac", Json::string("0".repeat(64))),
         ("nonce", Json::string(new_id("p-"))),
         ("type", Json::string("hello")),
@@ -326,6 +329,41 @@ fn unauthenticated_probe_refused_and_logged() {
     assert_eq!(text(&response, "decision"), "ALLOW");
     assert_eq!(delivered_files(&proc.store).len(), 1);
     runtime.close();
+}
+
+#[test]
+fn replayed_hello_nonce_is_refused() {
+    let root = std::env::temp_dir().join(format!("voss-outbox-replay-{}", new_id("")));
+    let proc = start_outbox(&root, false, false);
+    let mut first = TcpStream::connect(("127.0.0.1", proc.port)).unwrap();
+    first.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    first.set_nodelay(true).unwrap();
+    let challenge = relay::read_frame(&mut first).unwrap();
+    assert_eq!(text(&challenge, "type"), "challenge");
+    let challenge_value = text(&challenge, "challenge");
+    let nonce = new_id("ob-");
+    let hello = Json::object([
+        ("challenge", Json::string(challenge_value.clone())),
+        ("mac", Json::string(outbox::sign_outbox_hello(&proc.key, &nonce, &challenge_value))),
+        ("nonce", Json::string(nonce)),
+        ("type", Json::string("hello")),
+        ("version", Json::string(outbox::OUTBOX_PROTOCOL)),
+    ]);
+    let bytes = relay::frame(&hello).unwrap();
+    first.write_all(&bytes).unwrap();
+    let reply = relay::read_frame(&mut first).unwrap();
+    assert_eq!(text(&reply, "type"), "hello_ok");
+    drop(first);
+    thread::sleep(Duration::from_millis(200));
+    let mut replay = TcpStream::connect(("127.0.0.1", proc.port)).unwrap();
+    replay.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    replay.set_nodelay(true).unwrap();
+    let _ = relay::read_frame(&mut replay).unwrap();
+    replay.write_all(&bytes).unwrap();
+    let reply2 = relay::read_frame(&mut replay).unwrap();
+    assert_eq!(text(&reply2, "status"), "error");
+    assert_eq!(text(&reply2, "reason"), "denied_outbox_auth");
+    assert!(control_events(&proc.store).iter().any(|e| e == "outbox_denied_hello"));
 }
 
 #[test]

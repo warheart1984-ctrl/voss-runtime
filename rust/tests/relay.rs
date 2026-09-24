@@ -144,19 +144,34 @@ fn wait_until(mut ready: impl FnMut() -> bool) {
     }
 }
 
+fn read_challenge(stream: &mut TcpStream, key: &[u8]) -> String {
+    let challenge = relay::read_frame(stream).unwrap();
+    assert_eq!(challenge.get("type").and_then(Json::as_str), Some("challenge"), "{challenge:?}");
+    let value = challenge.get("challenge").and_then(Json::as_str).expect("challenge value").to_string();
+    let mac = relay::sign_challenge(key, &value);
+    assert_eq!(challenge.get("mac").and_then(Json::as_str), Some(mac.as_str()), "{challenge:?}");
+    value
+}
+
+fn raw_hello(key: &[u8], nonce: &str, challenge: &str) -> Vec<u8> {
+    let hello = Json::object([
+        ("type", Json::string("hello")),
+        ("version", Json::string(RELAY_PROTOCOL)),
+        ("challenge", Json::string(challenge)),
+        ("nonce", Json::string(nonce)),
+        ("mac", Json::string(relay::sign_hello(key, nonce, challenge))),
+    ]);
+    relay::frame(&hello).unwrap()
+}
+
 fn handshake(port: u16, key: &[u8]) -> TcpStream {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
     stream.set_nodelay(true).unwrap();
-    let nonce = new_id("relay-");
-    let hello = Json::object([
-        ("type", Json::string("hello")),
-        ("version", Json::string(RELAY_PROTOCOL)),
-        ("nonce", Json::string(&nonce)),
-        ("mac", Json::string(relay::sign_hello(key, &nonce))),
-    ]);
-    stream.write_all(&relay::frame(&hello).unwrap()).unwrap();
+    let challenge = read_challenge(&mut stream, key);
+    let bytes = raw_hello(key, &new_id("relay-"), &challenge);
+    stream.write_all(&bytes).unwrap();
     let reply = relay::read_frame(&mut stream).unwrap();
     assert_eq!(reply.get("type").and_then(Json::as_str), Some("hello_ok"), "{reply:?}");
     let begin = relay::frame_signed(
@@ -322,9 +337,12 @@ fn probe_without_credential_is_refused_and_harmless() {
     let mut stream = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     stream.set_nodelay(true).unwrap();
+    let challenge = relay::read_frame(&mut stream).unwrap();
+    assert_eq!(challenge.get("type").and_then(Json::as_str), Some("challenge"), "{challenge:?}");
     let hello = Json::object([
         ("type", Json::string("hello")),
         ("version", Json::string(RELAY_PROTOCOL)),
+        ("challenge", Json::string("")),
         ("nonce", Json::string(new_id("relay-"))),
         ("mac", Json::string("0".repeat(64))),
     ]);
@@ -386,12 +404,15 @@ fn sequence_gap_compromises_store() {
     let mut again = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
     again.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     again.set_nodelay(true).unwrap();
+    let challenge = relay::read_frame(&mut again).unwrap();
+    assert_eq!(challenge.get("type").and_then(Json::as_str), Some("challenge"), "{challenge:?}");
     let nonce = new_id("relay-");
     let hello = Json::object([
         ("type", Json::string("hello")),
         ("version", Json::string(RELAY_PROTOCOL)),
+        ("challenge", Json::string("stale")),
         ("nonce", Json::string(&nonce)),
-        ("mac", Json::string(relay::sign_hello(&relay.key, &nonce))),
+        ("mac", Json::string(relay::sign_hello(&relay.key, &nonce, &format!("stale-{nonce}")))),
     ]);
     again.write_all(&relay::frame(&hello).unwrap()).unwrap();
     let reply = relay::read_frame(&mut again).unwrap();
@@ -542,14 +563,9 @@ fn replayed_hello_nonce_is_refused_and_not_compromising() {
     let mut first = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
     first.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     first.set_nodelay(true).unwrap();
+    let challenge = read_challenge(&mut first, &relay.key);
     let nonce = new_id("relay-");
-    let hello = Json::object([
-        ("type", Json::string("hello")),
-        ("version", Json::string(RELAY_PROTOCOL)),
-        ("nonce", Json::string(&nonce)),
-        ("mac", Json::string(relay::sign_hello(&relay.key, &nonce))),
-    ]);
-    let bytes = relay::frame(&hello).unwrap();
+    let bytes = raw_hello(&relay.key, &nonce, &challenge);
     first.write_all(&bytes).unwrap();
     assert_eq!(
         relay::read_frame(&mut first).unwrap().get("type").and_then(Json::as_str),
@@ -560,6 +576,7 @@ fn replayed_hello_nonce_is_refused_and_not_compromising() {
     let mut replay = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
     replay.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     replay.set_nodelay(true).unwrap();
+    let _ = relay::read_frame(&mut replay).unwrap(); // challenge from the same process
     replay.write_all(&bytes).unwrap();
     let reply = relay::read_frame(&mut replay).unwrap();
     assert_eq!(reply.get("type").and_then(Json::as_str), Some("violation"));
@@ -573,14 +590,9 @@ fn replayed_hello_nonce_is_refused_and_not_compromising() {
     let mut fresh = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
     fresh.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     fresh.set_nodelay(true).unwrap();
-    let nonce = new_id("relay-");
-    let hello = Json::object([
-        ("type", Json::string("hello")),
-        ("version", Json::string(RELAY_PROTOCOL)),
-        ("nonce", Json::string(&nonce)),
-        ("mac", Json::string(relay::sign_hello(&relay.key, &nonce))),
-    ]);
-    fresh.write_all(&relay::frame(&hello).unwrap()).unwrap();
+    let challenge = read_challenge(&mut fresh, &relay.key);
+    let bytes = raw_hello(&relay.key, &new_id("relay-"), &challenge);
+    fresh.write_all(&bytes).unwrap();
     assert_eq!(
         relay::read_frame(&mut fresh).unwrap().get("type").and_then(Json::as_str),
         Some("hello_ok")
@@ -589,7 +601,7 @@ fn replayed_hello_nonce_is_refused_and_not_compromising() {
 }
 
 #[test]
-fn restart_with_same_key_accepts_a_captured_hello() {
+fn restart_with_same_key_refuses_a_captured_hello() {
     let root = std::env::temp_dir().join(format!("voss-relay-restart-{}", new_id("")));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
@@ -605,14 +617,8 @@ fn restart_with_same_key_accepts_a_captured_hello() {
     let mut stream = TcpStream::connect(("127.0.0.1", first.port())).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     stream.set_nodelay(true).unwrap();
-    let nonce = new_id("relay-");
-    let hello = Json::object([
-        ("type", Json::string("hello")),
-        ("version", Json::string(RELAY_PROTOCOL)),
-        ("nonce", Json::string(&nonce)),
-        ("mac", Json::string(relay::sign_hello(&key, &nonce))),
-    ]);
-    let bytes = relay::frame(&hello).unwrap();
+    let challenge = read_challenge(&mut stream, &key);
+    let bytes = raw_hello(&key, &new_id("relay-"), &challenge);
     stream.write_all(&bytes).unwrap();
     assert_eq!(
         relay::read_frame(&mut stream).unwrap().get("type").and_then(Json::as_str),
@@ -632,11 +638,21 @@ fn restart_with_same_key_accepts_a_captured_hello() {
     let mut replay = TcpStream::connect(("127.0.0.1", second.port())).unwrap();
     replay.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     replay.set_nodelay(true).unwrap();
+    let _ = relay::read_frame(&mut replay).unwrap(); // this process's fresh challenge
     replay.write_all(&bytes).unwrap();
+    let reply = relay::read_frame(&mut replay).unwrap();
+    assert_eq!(reply.get("type").and_then(Json::as_str), Some("violation"));
+    assert_eq!(reply.get("reason").and_then(Json::as_str), Some("denied_hello_auth"));
+    drop(replay);
+    // A legit client holding the same key still connects (fresh challenge).
+    let mut legit = TcpStream::connect(("127.0.0.1", second.port())).unwrap();
+    legit.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    legit.set_nodelay(true).unwrap();
+    let challenge = read_challenge(&mut legit, &key);
+    legit.write_all(&raw_hello(&key, &new_id("relay-"), &challenge)).unwrap();
     assert_eq!(
-        relay::read_frame(&mut replay).unwrap().get("type").and_then(Json::as_str),
-        Some("hello_ok"),
-        "a restarted server with the same transfer key has an empty nonce cache"
+        relay::read_frame(&mut legit).unwrap().get("type").and_then(Json::as_str),
+        Some("hello_ok")
     );
     second.stop();
     let _ = fs::remove_dir_all(root);

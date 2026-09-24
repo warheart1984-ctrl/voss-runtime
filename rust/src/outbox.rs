@@ -29,12 +29,30 @@ type HmacSha256 = Hmac<Sha256>;
 pub const OUTBOX_PROTOCOL: &str = "voss.outbox.1";
 const MAX_DIGEST_CHARS: usize = 128;
 
-pub fn sign_outbox_hello(transfer_key: &[u8], nonce: &str) -> String {
+pub fn sign_outbox_hello(transfer_key: &[u8], nonce: &str, challenge: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(transfer_key).expect("HMAC accepts this key");
     mac.update(OUTBOX_PROTOCOL.as_bytes());
     mac.update(b":");
+    mac.update(challenge.as_bytes());
+    mac.update(b":");
     mac.update(nonce.as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+pub fn sign_outbox_challenge(transfer_key: &[u8], challenge: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(transfer_key).expect("HMAC accepts this key");
+    mac.update(OUTBOX_PROTOCOL.as_bytes());
+    mac.update(b":challenge:");
+    mac.update(challenge.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn outbox_challenge_frame(transfer_key: &[u8], challenge: &str) -> Json {
+    Json::object([
+        ("mac", Json::string(sign_outbox_challenge(transfer_key, challenge))),
+        ("challenge", Json::string(challenge)),
+        ("type", Json::string("challenge")),
+    ])
 }
 
 struct DeliveryFields {
@@ -58,6 +76,10 @@ struct ServerInner {
     ledger_path: PathBuf,
     delivered_dir: PathBuf,
     transfer_key: Vec<u8>,
+    // Fresh per-process challenge: restarting the server mints a new one, so a
+    // hello that echoed an earlier process's challenge (same transfer key) can
+    // never open a session on this process.
+    challenge: String,
     drop_ack: bool,
     store: Mutex<Store>,
     stop: AtomicBool,
@@ -95,6 +117,7 @@ impl OutboxServer {
             ledger_path,
             delivered_dir,
             transfer_key,
+            challenge: new_id("challenge-"),
             drop_ack,
             store: Mutex::new(Store {
                 receipts,
@@ -165,6 +188,8 @@ fn dispatch(inner: Arc<ServerInner>, stream: TcpStream) {
 
 fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStream {
     prepare(&mut stream, Duration::from_secs(120));
+    // Speak first with this process's challenge; a valid hello must MAC over it.
+    reply(&mut stream, &outbox_challenge_frame(&inner.transfer_key, &inner.challenge));
     let hello = match relay::read_frame(&mut stream) {
         Ok(message) => message,
         Err(_) => {
@@ -244,7 +269,7 @@ fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStrea
 }
 
 fn claim_hello(inner: &ServerInner, message: &Json) -> Option<&'static str> {
-    if !valid_hello(&inner.transfer_key, message) {
+    if !valid_hello(&inner.transfer_key, &inner.challenge, message) {
         return Some("denied_outbox_auth");
     }
     let nonce = message.get("nonce").and_then(Json::as_str).unwrap_or("");
@@ -479,11 +504,14 @@ fn check_deliver(message: &Json) -> Result<DeliveryFields, String> {
     Ok(fields)
 }
 
-fn valid_hello(transfer_key: &[u8], message: &Json) -> bool {
+fn valid_hello(transfer_key: &[u8], challenge: &str, message: &Json) -> bool {
     if message.get("type").and_then(Json::as_str) != Some("hello") {
         return false;
     }
     if message.get("version").and_then(Json::as_str) != Some(OUTBOX_PROTOCOL) {
+        return false;
+    }
+    if message.get("challenge").and_then(Json::as_str) != Some(challenge) {
         return false;
     }
     let Some(nonce) = message.get("nonce").and_then(Json::as_str) else {
@@ -492,7 +520,7 @@ fn valid_hello(transfer_key: &[u8], message: &Json) -> bool {
     let Some(mac) = message.get("mac").and_then(Json::as_str) else {
         return false;
     };
-    constant_time_eq(&sign_outbox_hello(transfer_key, nonce), mac)
+    constant_time_eq(&sign_outbox_hello(transfer_key, nonce, challenge), mac)
 }
 
 #[derive(Debug)]
@@ -720,9 +748,20 @@ fn open_session(inner: &LinkInner, state: &mut LinkState) -> Result<(), String> 
     stream.set_nonblocking(false).map_err(|error| error.to_string())?;
     stream.set_read_timeout(Some(inner.timeout)).map_err(|error| error.to_string())?;
     stream.set_write_timeout(Some(inner.timeout)).map_err(|error| error.to_string())?;
+    let challenge = relay::read_frame(&mut stream).map_err(|error| error.to_string())?;
+    if challenge.get("type").and_then(Json::as_str) != Some("challenge") {
+        return Err(format!("no challenge: {challenge:?}"));
+    }
+    let Some(challenge_value) = challenge.get("challenge").and_then(Json::as_str) else {
+        return Err(format!("no challenge: {challenge:?}"));
+    };
+    if challenge.get("mac").and_then(Json::as_str) != Some(&sign_outbox_challenge(&inner.transfer_key, challenge_value)) {
+        return Err("challenge failed authentication".to_string());
+    }
     let nonce = new_id("ob-");
     let hello = Json::object([
-        ("mac", Json::string(sign_outbox_hello(&inner.transfer_key, &nonce))),
+        ("challenge", Json::string(challenge_value)),
+        ("mac", Json::string(sign_outbox_hello(&inner.transfer_key, &nonce, challenge_value))),
         ("nonce", Json::string(nonce)),
         ("type", Json::string("hello")),
         ("version", Json::string(OUTBOX_PROTOCOL)),
