@@ -105,6 +105,7 @@ pub fn coarse_reason_code(full: &str) -> &'static str {
 pub trait HealthProvider: Send + Sync {
     fn watchdog_health_ok(&self) -> bool;
     fn watchdog_accepts_work(&self, worker_id: &str) -> bool;
+    fn relay_ok(&self) -> bool { true }
 }
 
 struct BrokerState {
@@ -391,6 +392,9 @@ impl Broker {
         if !self.health.watchdog_accepts_work(worker_id) {
             problems.push("watchdog-suspended");
         }
+        if !self.health.relay_ok() {
+            problems.push("relay-unavailable");
+        }
         if problems.is_empty() {
             return None;
         }
@@ -613,6 +617,9 @@ impl Broker {
             ),
         ).is_err() {
             return BrokerDecision::deny("denied_audit_unavailable", self.policy.version());
+        }
+        if !self.audit.healthy() || !self.wal.healthy() {
+            return BrokerDecision::deny("denied_log_unavailable", self.policy.version());
         }
         if !flow_id.is_empty() {
             let _ = self.approvals.mark_executing(flow_id);
