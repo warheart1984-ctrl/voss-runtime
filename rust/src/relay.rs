@@ -62,12 +62,33 @@ impl RelayFail {
     }
 }
 
-pub fn sign_hello(transfer_key: &[u8], nonce: &str) -> String {
+pub fn sign_hello(transfer_key: &[u8], nonce: &str, challenge: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(transfer_key).expect("HMAC accepts this key");
     mac.update(RELAY_PROTOCOL.as_bytes());
     mac.update(b":");
+    mac.update(challenge.as_bytes());
+    mac.update(b":");
     mac.update(nonce.as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+pub fn sign_challenge(transfer_key: &[u8], challenge: &str) -> String {
+    // Binds the server's per-process challenge frame to transfer-key
+    // possession, so an observer cannot substitute a challenge: every hello
+    // must MAC over the challenge THIS process issued.
+    let mut mac = HmacSha256::new_from_slice(transfer_key).expect("HMAC accepts this key");
+    mac.update(RELAY_PROTOCOL.as_bytes());
+    mac.update(b":challenge:");
+    mac.update(challenge.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+pub fn challenge_frame(transfer_key: &[u8], challenge: &str) -> Json {
+    Json::object([
+        ("type", Json::string("challenge")),
+        ("challenge", Json::string(challenge)),
+        ("mac", Json::string(sign_challenge(transfer_key, challenge))),
+    ])
 }
 
 pub fn frame_signed(protocol: &str, transfer_key: &[u8], seq: i64, message: &Json) -> Result<Json, String> {
@@ -149,9 +170,7 @@ struct ServerState {
     stored_count: i64,
     compromised: bool,
     stale: bool,
-    // Hello nonces this process has accepted. Not written to disk: a restart
-    // that keeps the same transfer key will accept a captured hello again.
-    // A fresh per-process challenge or key would prevent that.
+    // Hello nonces this process has accepted. Not written to disk.
     seen_nonces: HashSet<String>,
 }
 
@@ -160,6 +179,11 @@ struct ServerInner {
     control_path: PathBuf,
     keyring: KeyRing,
     transfer_key: Vec<u8>,
+    // Fresh per-process challenge: restarting the server mints a new one, so
+    // a hello that echoed an earlier process's challenge (same transfer key)
+    // can never open a session on this process. The single-use nonce set only
+    // rejects replays within one process lifetime.
+    challenge: String,
     timeout: Duration,
         stop: AtomicBool,
         active: AtomicBool,
@@ -204,6 +228,7 @@ impl AuditRelayServer {
                 control_path,
                 keyring,
                 transfer_key,
+                challenge: new_id("challenge-"),
                 timeout,
                 stop: AtomicBool::new(false),
                 active: AtomicBool::new(false),
@@ -268,6 +293,8 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(inner.timeout));
     let _ = stream.set_write_timeout(Some(inner.timeout));
+    // Speak first with this process's challenge; a valid hello must MAC over it.
+    reply(&mut stream, &challenge_frame(&inner.transfer_key, &inner.challenge));
     if inner.state.lock().expect("relay state").compromised {
         reply(&mut stream, &Json::object([
             ("type", Json::string("refused")),
@@ -478,7 +505,7 @@ fn ack(seq: i64, dup: bool, chain_len: i64) -> Json {
 }
 
 fn claim_hello(inner: &ServerInner, message: &Json) -> Option<&'static str> {
-    if !valid_hello(&inner.transfer_key, message) {
+    if !valid_hello(&inner.transfer_key, &inner.challenge, message) {
         return Some("denied_hello_auth");
     }
     let nonce = message.get("nonce").and_then(Json::as_str).unwrap_or("");
@@ -489,11 +516,14 @@ fn claim_hello(inner: &ServerInner, message: &Json) -> Option<&'static str> {
     None
 }
 
-fn valid_hello(transfer_key: &[u8], message: &Json) -> bool {
+fn valid_hello(transfer_key: &[u8], challenge: &str, message: &Json) -> bool {
     if message.get("type").and_then(Json::as_str) != Some("hello") {
         return false;
     }
     if message.get("version").and_then(Json::as_str) != Some(RELAY_PROTOCOL) {
+        return false;
+    }
+    if message.get("challenge").and_then(Json::as_str) != Some(challenge) {
         return false;
     }
     let Some(nonce) = message.get("nonce").and_then(Json::as_str) else {
@@ -502,7 +532,7 @@ fn valid_hello(transfer_key: &[u8], message: &Json) -> bool {
     let Some(mac) = message.get("mac").and_then(Json::as_str) else {
         return false;
     };
-    constant_time_eq(&sign_hello(transfer_key, nonce), mac)
+    constant_time_eq(&sign_hello(transfer_key, nonce, challenge), mac)
 }
 
 fn violate(inner: &ServerInner, stream: &mut TcpStream, reason: &str) {
@@ -660,12 +690,23 @@ fn session(inner: &ClientInner, one_pass: bool) -> Result<(), RelayFail> {
     stream.set_nodelay(true).map_err(|error| RelayFail::Io(error.to_string()))?;
     stream.set_read_timeout(Some(inner.timeout)).map_err(|error| RelayFail::Io(error.to_string()))?;
     stream.set_write_timeout(Some(inner.timeout)).map_err(|error| RelayFail::Io(error.to_string()))?;
+    let challenge = read_frame(&mut stream)?;
+    let Some(challenge_value) = challenge.get("challenge").and_then(Json::as_str) else {
+        return Err(RelayFail::Violation(format!("no challenge: {challenge:?}")));
+    };
+    if challenge.get("type").and_then(Json::as_str) != Some("challenge") {
+        return Err(RelayFail::Violation(format!("no challenge: {challenge:?}")));
+    }
+    if challenge.get("mac").and_then(Json::as_str) != Some(&sign_challenge(&inner.transfer_key, challenge_value)) {
+        return Err(RelayFail::Violation("challenge failed authentication".to_string()));
+    }
     let nonce = new_id("relay-");
     let hello = Json::object([
         ("type", Json::string("hello")),
         ("version", Json::string(RELAY_PROTOCOL)),
+        ("challenge", Json::string(challenge_value)),
         ("nonce", Json::string(&nonce)),
-        ("mac", Json::string(sign_hello(&inner.transfer_key, &nonce))),
+        ("mac", Json::string(sign_hello(&inner.transfer_key, &nonce, challenge_value))),
     ]);
     write_frame(&mut stream, &hello)?;
     let reply = read_frame(&mut stream)?;
