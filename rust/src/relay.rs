@@ -97,6 +97,23 @@ pub fn frame_signed(protocol: &str, transfer_key: &[u8], seq: i64, message: &Jso
     insert_field(&body, "mac", Json::string(mac))
 }
 
+/// Derive a connection-scoped frame key from the authenticated challenge and hello nonce.
+/// Length-prefixing keeps the domain-separated input unambiguous across languages.
+pub fn derive_session_key(protocol: &str, transfer_key: &[u8], challenge: &str, nonce: &str) -> Vec<u8> {
+    let fields = [
+        b"voss.session-key.v1".as_slice(),
+        protocol.as_bytes(),
+        challenge.as_bytes(),
+        nonce.as_bytes(),
+    ];
+    let mut mac = HmacSha256::new_from_slice(transfer_key).expect("HMAC accepts this key");
+    for field in fields {
+        mac.update(&(field.len() as u32).to_be_bytes());
+        mac.update(field);
+    }
+    mac.finalize().into_bytes().to_vec()
+}
+
 pub fn frame_is_authed(message: &Json, protocol: &str, transfer_key: &[u8]) -> bool {
     let Some(seq) = json_i64(message.get("seq")) else {
         return false;
@@ -306,15 +323,23 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
     let mut idle = 0u32;
     let mut phase = "hello";
     let mut expected_seq = 0i64;
+    let mut session_key: Option<Vec<u8>> = None;
+    let mut reply_seq = 0i64;
     loop {
         if inner.stop.load(Ordering::SeqCst) {
             break;
         }
         if inner.state.lock().expect("relay state").compromised {
-            reply(&mut stream, &Json::object([
+            let refused = Json::object([
                 ("type", Json::string("refused")),
                 ("reason", Json::string("relay_compromised")),
-            ]));
+            ]);
+            if let Some(key) = session_key.as_deref() {
+                reply_seq += 1;
+                reply_signed(&mut stream, key, reply_seq, &refused);
+            } else {
+                reply(&mut stream, &refused);
+            }
             break;
         }
         let message = match read_frame(&mut stream) {
@@ -338,7 +363,7 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
                 break;
             }
             Err(error) => {
-                violate(inner, &mut stream, &error.violation().to_string());
+                violate_session(inner, &mut stream, &error.violation().to_string(), session_key.as_deref(), &mut reply_seq);
                 break;
             }
         };
@@ -361,23 +386,31 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
                 break;
             }
             let nonce = message.get("nonce").and_then(Json::as_str).unwrap_or("");
+            session_key = Some(derive_session_key(
+                RELAY_PROTOCOL,
+                &inner.transfer_key,
+                &inner.challenge,
+                nonce,
+            ));
             write_control(&inner.control_path, "relay_accepted_hello", "authenticated host connected");
-            reply(&mut stream, &Json::object([
+            reply_seq += 1;
+            let hello_ok = frame_signed(RELAY_PROTOCOL, session_key.as_deref().unwrap_or(&[]), reply_seq, &Json::object([
                 ("type", Json::string("hello_ok")),
                 ("nonce", Json::string(nonce)),
-            ]));
+            ])).unwrap_or(Json::Null);
+            reply(&mut stream, &hello_ok);
             phase = "stream_begin";
         } else if phase == "stream_begin" {
             if message.get("type").and_then(Json::as_str) != Some("stream_begin") {
-                violate(inner, &mut stream, "expected_stream_begin");
+                violate_session(inner, &mut stream, "expected_stream_begin", session_key.as_deref(), &mut reply_seq);
                 break;
             }
-            if !frame_is_authed(&message, RELAY_PROTOCOL, &inner.transfer_key) {
-                violate(inner, &mut stream, "stream_begin_auth");
+            if !session_key.as_deref().is_some_and(|key| frame_is_authed(&message, RELAY_PROTOCOL, key)) {
+                violate_session(inner, &mut stream, "stream_begin_auth", session_key.as_deref(), &mut reply_seq);
                 break;
             }
             if json_i64(message.get("seq")) != Some(1) {
-                violate(inner, &mut stream, "sequence_gap expected 1");
+                violate_session(inner, &mut stream, "sequence_gap expected 1", session_key.as_deref(), &mut reply_seq);
                 break;
             }
             let state = inner.state.lock().expect("relay state");
@@ -387,36 +420,40 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
                 ("head", Json::string(&state.head)),
             ]);
             drop(state);
-            reply(&mut stream, &ready);
-            expected_seq = 0;
+            reply_seq += 1;
+            let signed_ready = frame_signed(RELAY_PROTOCOL, session_key.as_deref().unwrap_or(&[]), reply_seq, &ready).unwrap_or(Json::Null);
+            reply(&mut stream, &signed_ready);
+            expected_seq = 1;
             phase = "records";
         } else {
-            if !frame_is_authed(&message, RELAY_PROTOCOL, &inner.transfer_key) {
-                violate(inner, &mut stream, "record_auth");
+            if !session_key.as_deref().is_some_and(|key| frame_is_authed(&message, RELAY_PROTOCOL, key)) {
+                violate_session(inner, &mut stream, "record_auth", session_key.as_deref(), &mut reply_seq);
                 break;
             }
             expected_seq += 1;
             let got = json_i64(message.get("seq"));
             if got != Some(expected_seq) {
                 let shown = got.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string());
-                violate(inner, &mut stream, &format!("sequence_gap expected {expected_seq} got {shown}"));
+                violate_session(inner, &mut stream, &format!("sequence_gap expected {expected_seq} got {shown}"), session_key.as_deref(), &mut reply_seq);
                 break;
             }
-            if !ingest_record(inner, &mut stream, &message) {
+            let next_reply_seq = reply_seq + 1;
+            if !ingest_record(inner, &mut stream, &message, session_key.as_deref().unwrap_or(&[]), next_reply_seq, &mut reply_seq) {
                 break;
             }
+            reply_seq = next_reply_seq;
         }
     }
     graceful_close(stream);
 }
 
-fn ingest_record(inner: &ServerInner, stream: &mut TcpStream, message: &Json) -> bool {
+fn ingest_record(inner: &ServerInner, stream: &mut TcpStream, message: &Json, frame_key: &[u8], reply_seq: i64, next_reply_seq: &mut i64) -> bool {
     let Some(record) = message.get("record").filter(|value| matches!(value, Json::Object(_))).cloned() else {
-        violate(inner, stream, "record_missing_payload");
+        violate_session(inner, stream, "record_missing_payload", Some(frame_key), next_reply_seq);
         return false;
     };
     let Some(event_id) = record.get("event_id").and_then(Json::as_str).map(str::to_string) else {
-        violate(inner, stream, "record_missing_id");
+        violate_session(inner, stream, "record_missing_id", Some(frame_key), next_reply_seq);
         return false;
     };
     let seq = json_i64(message.get("seq")).unwrap_or(0);
@@ -425,19 +462,19 @@ fn ingest_record(inner: &ServerInner, stream: &mut TcpStream, message: &Json) ->
         if let Some(existing) = state.ids.get(&event_id) {
             if existing != &record {
                 drop(state);
-                violate(inner, stream, &format!("duplicate_contradiction:{event_id}"));
+                violate_session(inner, stream, &format!("duplicate_contradiction:{event_id}"), Some(frame_key), next_reply_seq);
                 return false;
             }
             let chain_len = state.stored_count;
             drop(state);
-            reply(stream, &ack(seq, true, chain_len));
+            reply_signed(stream, frame_key, reply_seq, &ack(seq, true, chain_len));
             return true;
         }
     }
     let (mac, chain) = match verify_record(&record, &inner.state.lock().expect("relay state").head, &inner.keyring) {
         Ok(value) => value,
         Err(error) => {
-            violate(inner, stream, &error.to_string());
+            violate_session(inner, stream, &error.to_string(), Some(frame_key), next_reply_seq);
             return false;
         }
     };
@@ -448,7 +485,7 @@ fn ingest_record(inner: &ServerInner, stream: &mut TcpStream, message: &Json) ->
         ("record", record.clone()),
     ]);
     let Ok(mut encoded) = canonical_bytes(&line) else {
-        violate(inner, stream, "record_encode");
+        violate_session(inner, stream, "record_encode", Some(frame_key), next_reply_seq);
         return false;
     };
     encoded.push(b'\n');
@@ -457,12 +494,12 @@ fn ingest_record(inner: &ServerInner, stream: &mut TcpStream, message: &Json) ->
         if let Some(existing) = state.ids.get(&event_id) {
             if existing != &record {
                 drop(state);
-                violate(inner, stream, &format!("duplicate_contradiction:{event_id}"));
+                violate_session(inner, stream, &format!("duplicate_contradiction:{event_id}"), Some(frame_key), next_reply_seq);
                 return false;
             }
             let chain_len = state.stored_count;
             drop(state);
-            reply(stream, &ack(seq, true, chain_len));
+            reply_signed(stream, frame_key, reply_seq, &ack(seq, true, chain_len));
             return true;
         }
         state.ids.insert(event_id, record);
@@ -472,12 +509,12 @@ fn ingest_record(inner: &ServerInner, stream: &mut TcpStream, message: &Json) ->
         if let Err(error) = append_bytes(&inner.store_path, &encoded) {
             state.compromised = true;
             drop(state);
-            violate(inner, stream, &error);
+            violate_session(inner, stream, &error, Some(frame_key), next_reply_seq);
             return false;
         }
         count
     };
-    reply(stream, &ack(seq, false, chain_len));
+    reply_signed(stream, frame_key, reply_seq, &ack(seq, false, chain_len));
     true
 }
 
@@ -498,7 +535,7 @@ fn verify_record(record: &Json, previous: &str, keyring: &KeyRing) -> Result<(St
 fn ack(seq: i64, dup: bool, chain_len: i64) -> Json {
     Json::object([
         ("type", Json::string("ack")),
-        ("seq", Json::Int(seq)),
+        ("request_seq", Json::Int(seq)),
         ("dup", Json::Bool(dup)),
         ("chain_len", Json::Int(chain_len)),
     ])
@@ -535,13 +572,25 @@ fn valid_hello(transfer_key: &[u8], challenge: &str, message: &Json) -> bool {
     constant_time_eq(&sign_hello(transfer_key, nonce, challenge), mac)
 }
 
-fn violate(inner: &ServerInner, stream: &mut TcpStream, reason: &str) {
+fn violate_session(
+    inner: &ServerInner,
+    stream: &mut TcpStream,
+    reason: &str,
+    frame_key: Option<&[u8]>,
+    reply_seq: &mut i64,
+) {
     inner.state.lock().expect("relay state").compromised = true;
     write_control(&inner.control_path, "relay_violation", reason);
-    reply(stream, &Json::object([
+    let message = Json::object([
         ("type", Json::string("violation")),
         ("reason", Json::string(reason)),
-    ]));
+    ]);
+    if let Some(key) = frame_key {
+        *reply_seq += 1;
+        reply_signed(stream, key, *reply_seq, &message);
+    } else {
+        reply(stream, &message);
+    }
 }
 
 fn reply(stream: &mut TcpStream, message: &Json) {
@@ -701,6 +750,12 @@ fn session(inner: &ClientInner, one_pass: bool) -> Result<(), RelayFail> {
         return Err(RelayFail::Violation("challenge failed authentication".to_string()));
     }
     let nonce = new_id("relay-");
+    let session_key = derive_session_key(
+        RELAY_PROTOCOL,
+        &inner.transfer_key,
+        challenge_value,
+        &nonce,
+    );
     let hello = Json::object([
         ("type", Json::string("hello")),
         ("version", Json::string(RELAY_PROTOCOL)),
@@ -710,16 +765,22 @@ fn session(inner: &ClientInner, one_pass: bool) -> Result<(), RelayFail> {
     ]);
     write_frame(&mut stream, &hello)?;
     let reply = read_frame(&mut stream)?;
-    if reply.get("type").and_then(Json::as_str) != Some("hello_ok") {
+    if reply.get("type").and_then(Json::as_str) != Some("hello_ok")
+        || !frame_is_authed(&reply, RELAY_PROTOCOL, &session_key)
+        || json_i64(reply.get("seq")) != Some(1)
+    {
         return Err(RelayFail::Violation(format!("hello rejected: {reply:?}")));
     }
-    let begin = frame_signed(RELAY_PROTOCOL, &inner.transfer_key, 1, &Json::object([
+    let begin = frame_signed(RELAY_PROTOCOL, &session_key, 1, &Json::object([
         ("type", Json::string("stream_begin")),
     ]))
     .map_err(RelayFail::Violation)?;
     write_frame(&mut stream, &begin)?;
     let ready = read_frame(&mut stream)?;
-    if ready.get("type").and_then(Json::as_str) != Some("stream_ready") {
+    if ready.get("type").and_then(Json::as_str) != Some("stream_ready")
+        || !frame_is_authed(&ready, RELAY_PROTOCOL, &session_key)
+        || json_i64(ready.get("seq")) != Some(2)
+    {
         return Err(RelayFail::Violation(format!("stream rejected: {ready:?}")));
     }
     {
@@ -728,7 +789,7 @@ fn session(inner: &ClientInner, one_pass: bool) -> Result<(), RelayFail> {
         state.connected = true;
         state.last_error.clear();
     }
-    let mut seq = 0i64;
+    let mut seq = 1i64;
     loop {
         for line in tail_once(inner)? {
             seq += 1;
@@ -738,7 +799,7 @@ fn session(inner: &ClientInner, one_pass: bool) -> Result<(), RelayFail> {
             };
             let signed = frame_signed(
                 RELAY_PROTOCOL,
-                &inner.transfer_key,
+                &session_key,
                 seq,
                 &Json::object([
                     ("type", Json::string("record")),
@@ -748,9 +809,18 @@ fn session(inner: &ClientInner, one_pass: bool) -> Result<(), RelayFail> {
             .map_err(RelayFail::Violation)?;
             write_frame(&mut stream, &signed)?;
             let ack = read_frame(&mut stream)?;
+            let expected_reply_seq = seq + 1;
+            if !frame_is_authed(&ack, RELAY_PROTOCOL, &session_key)
+                || json_i64(ack.get("seq")) != Some(expected_reply_seq)
+            {
+                return Err(RelayFail::Violation("relay ack failed authentication".to_string()));
+            }
             if ack.get("type").and_then(Json::as_str) == Some("violation") {
                 let reason = ack.get("reason").and_then(Json::as_str).unwrap_or("");
                 return Err(RelayFail::Violation(format!("relay: {reason}")));
+            }
+            if json_i64(ack.get("request_seq")) != Some(seq) {
+                return Err(RelayFail::Violation("relay ack request sequence mismatch".to_string()));
             }
             if ack.get("type").and_then(Json::as_str) != Some("ack") {
                 return Err(RelayFail::Violation(format!("unexpected relay reply: {ack:?}")));
@@ -798,6 +868,12 @@ fn write_frame(stream: &mut TcpStream, message: &Json) -> Result<(), RelayFail> 
     let bytes = frame(message)?;
     stream.write_all(&bytes).map_err(|error| RelayFail::Io(error.to_string()))?;
     stream.flush().map_err(|error| RelayFail::Io(error.to_string()))
+}
+
+fn reply_signed(stream: &mut TcpStream, key: &[u8], seq: i64, message: &Json) {
+    if let Ok(signed) = frame_signed(RELAY_PROTOCOL, key, seq, message) {
+        reply(stream, &signed);
+    }
 }
 
 fn load_store(path: &Path, state: &mut ServerState, keyring: &KeyRing) {

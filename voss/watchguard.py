@@ -38,7 +38,8 @@ from typing import Any, Dict, List, Optional
 
 from .canonical import new_id
 from .relay import (
-    _frame, _read_frame, frame_signed, frame_is_authed, graceful_close,
+    _frame, _read_frame, frame_signed, frame_is_authed, derive_session_key,
+    graceful_close,
 )
 
 GUARD_PROTOCOL = "voss.watchguard.1"
@@ -106,6 +107,8 @@ class WatchGuardServer:
         # against a (possibly reused) pid even with the same transfer key.
         self._challenge = new_id("challenge-")
         self._seen_nonces: set = set()  # hello nonces, this process only
+        self._frame_key = b""
+        self._reply_seq = 0
 
         self._lock = threading.RLock()
         self._pid: Optional[int] = None
@@ -224,7 +227,9 @@ class WatchGuardServer:
                                self._transfer_key, self._challenge)})
         phase = "hello"
         conn_tick: Optional[int] = None
-        auth_seq = 1  # post-hello frames are numbered 1..; replay/gap clamps
+        auth_seq = 1
+        self._reply_seq = 0
+        self._frame_key = b""
         while not self._stop.is_set():
             if self.triggered:
                 self._reply(conn, {"type": "ack", "status": "triggered"})
@@ -247,63 +252,67 @@ class WatchGuardServer:
                     self._reply(conn, {"type": "ack", "status": "error",
                                        "reason": "denied_guard_auth"})
                     return
+                self._frame_key = derive_session_key(
+                    GUARD_PROTOCOL, self._transfer_key, self._challenge,
+                    str(msg["nonce"]),
+                )
                 _write_control(self.control_path, "guard_hello_ok", "guard")
-                self._reply(conn, {"type": "ack", "status": "ok"})
+                self._reply_session(conn, {"type": "ack", "status": "ok"})
                 phase = "guard"
                 conn_tick = None
                 with self._lock:
                     self._last_heartbeat = time.monotonic()
                 continue
 
-            if not frame_is_authed(msg, GUARD_PROTOCOL, self._transfer_key):
+            if not frame_is_authed(msg, GUARD_PROTOCOL, self._frame_key):
                 _write_control(self.control_path, "guard_anomaly",
                                "unauthenticated frame")
-                self._reply(conn, {"type": "ack", "status": "error",
-                                   "reason": "denied_guard_auth"})
+                self._reply_session(conn, {"type": "ack", "status": "error",
+                                           "reason": "denied_guard_auth"})
                 return
             if msg.get("seq") != auth_seq:
                 _write_control(self.control_path, "guard_anomaly",
                                f"sequence_error expected {auth_seq} "
                                f"got {msg.get('seq')}")
-                self._reply(conn, {"type": "ack", "status": "error",
-                                   "reason": "sequence_error"})
+                self._reply_session(conn, {"type": "ack", "status": "error",
+                                           "reason": "sequence_error"})
                 return
             auth_seq += 1
 
             if msg.get("type") == "register":
                 if self._registered:
-                    self._reply(conn, {"type": "ack", "status": "error",
-                                       "reason": "guard_already_registered"})
+                    self._reply_session(conn, {"type": "ack", "status": "error",
+                                               "reason": "guard_already_registered"})
                     return
                 pid = msg.get("pid")
                 if not isinstance(pid, int) or pid <= 0:
-                    self._reply(conn, {"type": "ack", "status": "error",
-                                       "reason": "invalid_pid"})
+                    self._reply_session(conn, {"type": "ack", "status": "error",
+                                               "reason": "invalid_pid"})
                     return
                 with self._lock:
                     self._pid, self._registered, self._last_heartbeat = (
                         pid, True, time.monotonic())
                 _write_control(self.control_path, "guard_register", f"pid={pid}")
-                self._reply(conn, {"type": "ack", "status": "ok"})
+                self._reply_session(conn, {"type": "ack", "status": "ok"})
                 continue
 
             if msg.get("type") == "heartbeat":
                 tick = msg.get("tick")
                 if not isinstance(tick, int) or tick < 0:
-                    self._reply(conn, {"type": "ack", "status": "error",
-                                       "reason": "invalid_tick"})
+                    self._reply_session(conn, {"type": "ack", "status": "error",
+                                               "reason": "invalid_tick"})
                     return
                 if conn_tick is not None and tick <= conn_tick:
                     _write_control(self.control_path, "guard_anomaly",
                                    f"heartbeat tick regressed "
                                    f"{conn_tick}->{tick}")
-                    self._reply(conn, {"type": "ack", "status": "error",
-                                       "reason": "tick_regression"})
+                    self._reply_session(conn, {"type": "ack", "status": "error",
+                                               "reason": "tick_regression"})
                     return
                 conn_tick = tick
                 with self._lock:
                     self._last_heartbeat = time.monotonic()
-                self._reply(conn, {"type": "ack", "status": "ok"})
+                self._reply_session(conn, {"type": "ack", "status": "ok"})
                 continue
 
             if msg.get("type") == "terminate":
@@ -316,11 +325,11 @@ class WatchGuardServer:
                 if pid is not None:
                     self._kill_pid(pid, "guarded worker",
                                    f"explicit terminate directive ({reason})")
-                self._reply(conn, {"type": "ack", "status": "triggered"})
+                self._reply_session(conn, {"type": "ack", "status": "triggered"})
                 return
 
-            self._reply(conn, {"type": "ack", "status": "error",
-                               "reason": "unknown_guard_frame"})
+            self._reply_session(conn, {"type": "ack", "status": "error",
+                                       "reason": "unknown_guard_frame"})
             return
 
     def _valid_hello(self, msg: Dict[str, Any]) -> bool:
@@ -366,6 +375,12 @@ class WatchGuardServer:
         except OSError:
             pass
 
+    def _reply_session(self, conn: socket.socket,
+                       msg: Dict[str, Any]) -> None:
+        self._reply_seq += 1
+        self._reply(conn, frame_signed(
+            GUARD_PROTOCOL, self._frame_key, self._reply_seq, msg))
+
 
 class WatchGuardLink:
     """Trusted-host client to the separate watch-guard process.
@@ -405,6 +420,8 @@ class WatchGuardLink:
         self._failed = False
         self._last_error = ""
         self._send_seq = 0
+        self._frame_key = b""
+        self._expect_seq = 0
 
     def start(self) -> None:
         if self._thread is None:
@@ -442,9 +459,9 @@ class WatchGuardLink:
             self._send_seq += 1
             try:
                 self._sock.sendall(_frame(frame_signed(
-                    GUARD_PROTOCOL, self._transfer_key, self._send_seq,
+                    GUARD_PROTOCOL, self._frame_key, self._send_seq,
                     {"type": "terminate", "reason": reason})))
-                reply = _read_frame(self._sock)
+                reply = self._read_session_reply(self._sock)
             except Exception as exc:
                 self._record_error(f"guard link lost: {exc}")
                 return {"status": "error", "reason": "link_lost"}
@@ -480,6 +497,7 @@ class WatchGuardLink:
     def _session(self) -> None:
         with self._io_lock:
             self._send_seq = 0
+            self._expect_seq = 0
             sock = self._connect()
             self._sock = sock
         try:
@@ -489,18 +507,18 @@ class WatchGuardLink:
                     if self._pid is not None and not self._registered:
                         self._send_seq += 1
                         self._send(sock, frame_signed(
-                            GUARD_PROTOCOL, self._transfer_key, self._send_seq,
+                            GUARD_PROTOCOL, self._frame_key, self._send_seq,
                             {"type": "register", "pid": self._pid}))
-                        reply = self._read(sock)
+                        reply = self._read_session_reply(sock)
                         if reply.get("status") != "ok":
                             raise GuardAnomaly(f"register refused: {reply!r}")
                         self._registered = True
                     tick += 1
                     self._send_seq += 1
                     self._send(sock, frame_signed(
-                        GUARD_PROTOCOL, self._transfer_key, self._send_seq,
+                        GUARD_PROTOCOL, self._frame_key, self._send_seq,
                         {"type": "heartbeat", "tick": tick}))
-                    reply = self._read(sock)
+                    reply = self._read_session_reply(sock)
                 if reply.get("status") == "triggered":
                     self._set_triggered("guard reported triggered")
                     return
@@ -528,13 +546,17 @@ class WatchGuardLink:
             sock.close()
             raise GuardAnomaly("challenge failed authentication")
         nonce = new_id("guard-")
+        self._frame_key = derive_session_key(
+            GUARD_PROTOCOL, self._transfer_key,
+            challenge["challenge"], nonce,
+        )
         self._send(sock, {"type": "hello", "version": GUARD_PROTOCOL,
                           "challenge": challenge["challenge"],
                           "nonce": nonce,
                           "mac": _sign_guard_hello(
                               self._transfer_key, nonce,
                               challenge["challenge"])})
-        reply = self._read(sock)
+        reply = self._read_session_reply(sock)
         if reply.get("status") != "ok":
             sock.close()
             raise GuardAnomaly(f"hello refused: {reply!r}")
@@ -542,6 +564,16 @@ class WatchGuardLink:
         self._connected = True
         self._last_error = ""
         return sock
+
+    def _read_session_reply(self, sock: socket.socket) -> Dict[str, Any]:
+        reply = self._read(sock)
+        expected = self._expect_seq + 1
+        if (not frame_is_authed(reply, GUARD_PROTOCOL, self._frame_key) or
+                reply.get("seq") != expected):
+            raise GuardAnomaly(
+                f"guard reply failed authentication (expected seq {expected})")
+        self._expect_seq = expected
+        return reply
 
     def _send(self, sock: socket.socket, msg: Dict[str, Any]) -> None:
         sock.sendall(_frame(msg))

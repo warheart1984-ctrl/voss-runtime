@@ -28,7 +28,9 @@ import unittest
 
 from voss.canonical import new_id
 from voss.keys import KeyRing
-from voss.relay import _frame, _read_frame, frame_signed
+from voss.relay import (
+    _frame, _read_frame, derive_session_key, frame_is_authed, frame_signed,
+)
 from voss.watchguard import (
     GUARD_PROTOCOL, WatchGuardLink, WatchGuardServer, _sign_guard_challenge,
     _sign_guard_hello,
@@ -120,7 +122,7 @@ def _control_details(store, event_prefix):
 
 
 def _raw_link(port, transfer_key, extra=None):
-    """Low-level authenticated socket. Returns (socket, hello reply)."""
+    """Low-level authenticated socket. Returns socket, hello reply, session key."""
     s = socket.create_connection(("127.0.0.1", port), timeout=5.0)
     challenge = _read_frame(s)
     assert challenge.get("type") == "challenge", challenge
@@ -130,8 +132,12 @@ def _raw_link(port, transfer_key, extra=None):
                       "mac": _sign_guard_hello(
                           transfer_key, nonce,
                           challenge["challenge"])}))
+    frame_key = derive_session_key(
+        GUARD_PROTOCOL, transfer_key, challenge["challenge"], nonce)
     reply = _read_frame(s)
-    return s, reply
+    assert frame_is_authed(reply, GUARD_PROTOCOL, frame_key), reply
+    assert reply.get("seq") == 1, reply
+    return s, reply, frame_key
 
 
 class WatchGuardProcessTests(unittest.TestCase):
@@ -232,17 +238,17 @@ class WatchGuardProcessTests(unittest.TestCase):
     def test_tick_regression_is_anomaly(self):
         with tempfile.TemporaryDirectory() as tmp:
             guard, store, port, key = _start_guard(tmp, timeout=5.0)
-            link, hello = _raw_link(port, key)
+            link, hello, frame_key = _raw_link(port, key)
             self.assertEqual(hello.get("status"), "ok")
             link.sendall(_frame(frame_signed(
-                GUARD_PROTOCOL, key, 1,
+                GUARD_PROTOCOL, frame_key, 1,
                 {"type": "register", "pid": os.getpid() + 1})))
             self.assertEqual(_read_frame(link).get("status"), "ok")
             link.sendall(_frame(frame_signed(
-                GUARD_PROTOCOL, key, 2, {"type": "heartbeat", "tick": 5})))
+                GUARD_PROTOCOL, frame_key, 2, {"type": "heartbeat", "tick": 5})))
             self.assertEqual(_read_frame(link).get("status"), "ok")
             link.sendall(_frame(frame_signed(
-                GUARD_PROTOCOL, key, 3, {"type": "heartbeat", "tick": 3})))
+                GUARD_PROTOCOL, frame_key, 3, {"type": "heartbeat", "tick": 3})))
             reply = _read_frame(link)
             self.assertEqual(reply.get("reason"), "tick_regression")
             link.close()
@@ -329,11 +335,11 @@ class WatchGuardProcessTests(unittest.TestCase):
     def test_forged_post_hello_frame_without_mac_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             guard, store, port, key = _start_guard(tmp, timeout=5.0)
-            link, _hello = _raw_link(port, key)
+            link, _hello, frame_key = _raw_link(port, key)
             # A valid hello, then a register frame whose MAC is forged (correct
             # seq, wrong mac): the guard must refuse it, connection included.
             forged = frame_signed(
-                GUARD_PROTOCOL, key, 1,
+                GUARD_PROTOCOL, frame_key, 1,
                 {"type": "register", "pid": os.getpid() + 1})
             forged["mac"] = "0" * 64
             link.sendall(_frame(forged))
@@ -347,7 +353,7 @@ class WatchGuardProcessTests(unittest.TestCase):
     def test_guard_is_exclusive_one_host_connection(self):
         with tempfile.TemporaryDirectory() as tmp:
             guard, store, port, key = _start_guard(tmp, timeout=5.0)
-            first, hello = _raw_link(port, key)
+            first, hello, _frame_key = _raw_link(port, key)
             self.assertEqual(hello.get("status"), "ok")
             time.sleep(0.2)
             second = socket.create_connection(("127.0.0.1", port), 5.0)

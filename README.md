@@ -1,14 +1,39 @@
 # Voss Human Sovereign Runtime
 
-A runnable prototype of a **governance engine for model adapters**: a worker
-that has no direct OS/file/network/credential/tool access can only cause
-effects that pass a signed, default-deny policy and an explicit, bound,
-single-use human approval — with every bypass attempt made visible in an
-authenticated, independently re-verifiable audit trail.
+A runnable prototype of a **governance engine for model adapters**: it routes
+declared worker actions through a signed, default-deny policy and explicit,
+bound human approval, and records them in an authenticated audit log with a
+separate relay copy. The current worker boundary is behavioral; OS-level
+confinement is still a production requirement.
 
 This is a prototype for demonstration and adversarial testing, not production
 deployment. Full design notes, threat model, known limitations, and RFC mapping
-live in [`PROTOTYPE.md`](PROTOTYPE.md).
+live in [`PROTOTYPE.md`](PROTOTYPE.md). The proposed provider gateway,
+credential boundary, Windows isolation work, and independent approval/audit
+authority are outlined in [`ARCHITECTURE-NEXT-STEPS.md`](ARCHITECTURE-NEXT-STEPS.md).
+
+## Position against external frameworks
+
+Voss is a proposed runtime governance specification and prototype, not a
+certified system or a claim of conformance to the frameworks below. The
+proposed Technical Standard is RFC-style, not an IETF RFC. The revised Voss
+Binding v1.1.0 still requires explicit Operator ratification; its text says
+v1.0.0 remains in effect until that approval is recorded.
+
+| Framework | Voss relationship | Current limit |
+|---|---|---|
+| [NIST AI RMF](https://www.nist.gov/itl/ai-risk-management-framework) | Voss requirements cover AI governance, declared risks, measurement, and containment at runtime. | A runtime specification does not establish an organization-wide AI risk program or deployment evidence. |
+| [ISO/IEC 23894](https://www.iso.org/standard/77304.html) | Voss translates some AI risk treatments into runtime controls and evidence requirements. | It does not establish the full organizational risk-management process. |
+| [ISO/IEC 42001](https://www.iso.org/standard/42001) | Operator authority, change control, and documented evidence support AI governance. | Voss alone is not an AI management system and has not been certified. |
+| [NIST SSDF](https://csrc.nist.gov/pubs/sp/800/218/final) | Voss specifies runtime security requirements. | Secure development, build, dependency, vulnerability, and release practices need a separate engineering process. |
+| [OWASP Top 10 for LLM Applications](https://genai.owasp.org/llm-top-10/) | Voss addresses risks such as excessive agency, prompt injection, and unsafe tool execution. | This is partial coverage; each applicable risk needs its own implementation evidence. |
+| [MITRE ATLAS](https://atlas.mitre.org/) | ATLAS can inform Voss red-team scenarios and adversarial tests. | ATLAS is a threat knowledge base, not a certification checklist. |
+
+These are descriptive mappings, not framework assessments. A conformance claim
+would require a clause-level crosswalk, implementation and deployment
+evidence, documented exceptions, and independent review. See
+[`PROTOTYPE.md`](PROTOTYPE.md) for current limits and
+[`ARCHITECTURE-NEXT-STEPS.md`](ARCHITECTURE-NEXT-STEPS.md) for proposed work.
 
 ```
                     ┌────────────────────────────────────────────────┐
@@ -20,7 +45,7 @@ live in [`PROTOTYPE.md`](PROTOTYPE.md).
    over authed     │   │  subproc)|scrub│   broker)  │   (exactly  │
    channel         │   └────▲─────┘      └─────┬──────┘   3)        │
                     └────────┼──────────────────┼───────────────────┘
-                             │ HMAC links (per-channel key, monotonic seq)
+                             │ HMAC links (per-session key, monotonic seq)
               ┌──────────────┼───────────┬─────┴──────────┬──────────────┐
               │              │           │                │              │
        ┌──────┴─────┐ ┌──────┴─────┐ ┌───┴─────┐   ┌──────┴─────┐ ┌──────┴─────┐

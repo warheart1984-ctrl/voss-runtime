@@ -164,19 +164,23 @@ fn raw_hello(key: &[u8], nonce: &str, challenge: &str) -> Vec<u8> {
     relay::frame(&hello).unwrap()
 }
 
-fn handshake(port: u16, key: &[u8]) -> TcpStream {
+fn handshake(port: u16, key: &[u8]) -> (TcpStream, Vec<u8>) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
     stream.set_nodelay(true).unwrap();
     let challenge = read_challenge(&mut stream, key);
-    let bytes = raw_hello(key, &new_id("relay-"), &challenge);
+    let nonce = new_id("relay-");
+    let bytes = raw_hello(key, &nonce, &challenge);
     stream.write_all(&bytes).unwrap();
     let reply = relay::read_frame(&mut stream).unwrap();
     assert_eq!(reply.get("type").and_then(Json::as_str), Some("hello_ok"), "{reply:?}");
+    let frame_key = relay::derive_session_key(RELAY_PROTOCOL, key, &challenge, &nonce);
+    assert!(relay::frame_is_authed(&reply, RELAY_PROTOCOL, &frame_key), "{reply:?}");
+    assert_eq!(reply.get("seq").and_then(Json::as_i64), Some(1));
     let begin = relay::frame_signed(
         RELAY_PROTOCOL,
-        key,
+        &frame_key,
         1,
         &Json::object([("type", Json::string("stream_begin"))]),
     )
@@ -184,7 +188,9 @@ fn handshake(port: u16, key: &[u8]) -> TcpStream {
     stream.write_all(&relay::frame(&begin).unwrap()).unwrap();
     let ready = relay::read_frame(&mut stream).unwrap();
     assert_eq!(ready.get("type").and_then(Json::as_str), Some("stream_ready"), "{ready:?}");
-    stream
+    assert!(relay::frame_is_authed(&ready, RELAY_PROTOCOL, &frame_key), "{ready:?}");
+    assert_eq!(ready.get("seq").and_then(Json::as_i64), Some(2));
+    (stream, frame_key)
 }
 
 fn raw_record(event_id: &str, content: &str) -> Json {
@@ -381,10 +387,10 @@ fn probe_without_credential_is_refused_and_harmless() {
 fn sequence_gap_compromises_store() {
     let root = std::env::temp_dir().join(format!("voss-relay-{}", new_id("")));
     let relay = start_relay(&root, 15.0);
-    let mut stream = handshake(relay.port, &relay.key);
+    let (mut stream, frame_key) = handshake(relay.port, &relay.key);
     let message = relay::frame_signed(
         RELAY_PROTOCOL,
-        &relay.key,
+        &frame_key,
         5,
         &Json::object([
             ("type", Json::string("record")),
@@ -424,11 +430,11 @@ fn sequence_gap_compromises_store() {
 fn duplicate_contradiction_fails_closed() {
     let root = std::env::temp_dir().join(format!("voss-relay-{}", new_id("")));
     let relay = start_relay(&root, 15.0);
-    let mut stream = handshake(relay.port, &relay.key);
+    let (mut stream, frame_key) = handshake(relay.port, &relay.key);
     let first = relay::frame_signed(
         RELAY_PROTOCOL,
-        &relay.key,
-        1,
+        &frame_key,
+        2,
         &Json::object([
             ("type", Json::string("record")),
             ("record", raw_record("evt-dup", "v1")),
@@ -439,8 +445,8 @@ fn duplicate_contradiction_fails_closed() {
     assert_eq!(relay::read_frame(&mut stream).unwrap().get("type").and_then(Json::as_str), Some("ack"));
     let second = relay::frame_signed(
         RELAY_PROTOCOL,
-        &relay.key,
-        2,
+        &frame_key,
+        3,
         &Json::object([
             ("type", Json::string("record")),
             ("record", raw_record("evt-dup", "v2")),
@@ -479,13 +485,13 @@ fn oversize_frame_refused() {
 fn stale_flagged_then_recovered() {
     let root = std::env::temp_dir().join(format!("voss-relay-{}", new_id("")));
     let relay = start_relay(&root, 0.4);
-    let mut stream = handshake(relay.port, &relay.key);
+    let (mut stream, frame_key) = handshake(relay.port, &relay.key);
     wait_until(|| control_events(&relay.store).contains(&"relay_stale".to_string()));
     assert!(control_events(&relay.store).contains(&"relay_stale".to_string()));
     let message = relay::frame_signed(
         RELAY_PROTOCOL,
-        &relay.key,
-        1,
+        &frame_key,
+        2,
         &Json::object([
             ("type", Json::string("record")),
             ("record", raw_record("evt-live", "val")),

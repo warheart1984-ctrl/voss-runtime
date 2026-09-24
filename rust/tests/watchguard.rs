@@ -145,7 +145,7 @@ fn control_details(store: &Path, prefix: &str) -> String {
         .join(" ")
 }
 
-fn raw_hello(port: u16, key: &[u8]) -> (TcpStream, Json) {
+fn raw_hello(port: u16, key: &[u8]) -> (TcpStream, Json, Vec<u8>) {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -162,7 +162,7 @@ fn raw_hello(port: u16, key: &[u8]) -> (TcpStream, Json) {
     let hello = Json::object([
         ("challenge", Json::string(challenge_value.clone())),
         ("mac", Json::string(watchguard::sign_guard_hello(key, &nonce, &challenge_value))),
-        ("nonce", Json::string(nonce)),
+        ("nonce", Json::string(&nonce)),
         ("type", Json::string("hello")),
         ("version", Json::string(GUARD_PROTOCOL)),
     ]);
@@ -170,7 +170,10 @@ fn raw_hello(port: u16, key: &[u8]) -> (TcpStream, Json) {
     stream.write_all(&bytes).unwrap();
     stream.flush().unwrap();
     let reply = relay::read_frame(&mut stream).expect("hello reply");
-    (stream, reply)
+    let frame_key = relay::derive_session_key(GUARD_PROTOCOL, key, &challenge_value, &nonce);
+    assert!(relay::frame_is_authed(&reply, GUARD_PROTOCOL, &frame_key), "{reply:?}");
+    assert_eq!(reply.get("seq").and_then(Json::as_i64), Some(1));
+    (stream, reply, frame_key)
 }
 
 fn send_frame(stream: &mut TcpStream, message: &Json) {
@@ -308,14 +311,14 @@ fn unauthenticated_hello_refused_worker_untouched() {
 fn tick_regression_is_anomaly() {
     let root = fresh("tick");
     let mut guard = start_guard(&root, 5.0);
-    let (mut stream, hello) = raw_hello(guard.port, &guard.key);
+    let (mut stream, hello, frame_key) = raw_hello(guard.port, &guard.key);
     assert_eq!(hello.get("status").and_then(Json::as_str), Some("ok"), "{hello:?}");
     let sleeper = spawn_sleeper();
     send_frame(
         &mut stream,
         &relay::frame_signed(
             GUARD_PROTOCOL,
-            &guard.key,
+            &frame_key,
             1,
             &Json::object([
                 ("pid", Json::Int(i64::from(sleeper.child.id()))),
@@ -329,7 +332,7 @@ fn tick_regression_is_anomaly() {
         &mut stream,
         &relay::frame_signed(
             GUARD_PROTOCOL,
-            &guard.key,
+            &frame_key,
             2,
             &Json::object([("tick", Json::Int(5)), ("type", Json::string("heartbeat"))]),
         )
@@ -340,7 +343,7 @@ fn tick_regression_is_anomaly() {
         &mut stream,
         &relay::frame_signed(
             GUARD_PROTOCOL,
-            &guard.key,
+            &frame_key,
             3,
             &Json::object([("tick", Json::Int(3)), ("type", Json::string("heartbeat"))]),
         )
@@ -357,7 +360,7 @@ fn tick_regression_is_anomaly() {
 fn guard_is_exclusive_one_host_connection() {
     let root = fresh("busy");
     let mut guard = start_guard(&root, 5.0);
-    let (first, hello) = raw_hello(guard.port, &guard.key);
+    let (first, hello, _frame_key) = raw_hello(guard.port, &guard.key);
     assert_eq!(hello.get("status").and_then(Json::as_str), Some("ok"), "{hello:?}");
     thread::sleep(Duration::from_millis(200));
     let mut second = TcpStream::connect(format!("127.0.0.1:{}", guard.port)).unwrap();

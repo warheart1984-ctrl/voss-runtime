@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional
 from .canonical import new_id
 from .relay import (
     RelayStreamClosed, _frame, _read_frame, frame_signed, frame_is_authed,
-    graceful_close,
+    derive_session_key, graceful_close,
 )
 
 OUTBOX_PROTOCOL = "voss.outbox.1"
@@ -148,6 +148,7 @@ class OutboxServer:
         self._seen_nonces: set = set()  # hello nonces, this process only
         self._auth_seq = 0  # per-connection host -> server frame seq
         self._reply_seq = 0  # per-connection server -> host reply seq
+        self._frame_key = b""
 
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -276,6 +277,10 @@ class OutboxServer:
                                "reason": "denied_outbox_auth"})
             return
         _write_control(self.control_path, "outbox_accepted_hello", "host")
+        self._frame_key = derive_session_key(
+            OUTBOX_PROTOCOL, self._transfer_key, self._challenge,
+            str(msg["nonce"]),
+        )
         self._auth_seq = 0
         self._reply_seq = 0
         self._reply_signed(conn, {"type": "hello_ok"})
@@ -291,7 +296,7 @@ class OutboxServer:
                     _write_control(self.control_path, "outbox_stream_closed",
                                    str(exc)[:120])
                 return
-            if not frame_is_authed(msg, OUTBOX_PROTOCOL, self._transfer_key):
+            if not frame_is_authed(msg, OUTBOX_PROTOCOL, self._frame_key):
                 _write_control(self.control_path, "outbox_anomaly",
                                "unauthenticated frame")
                 return
@@ -455,7 +460,7 @@ class OutboxServer:
             self._reply_seq += 1
         try:
             conn.sendall(_frame(frame_signed(
-                OUTBOX_PROTOCOL, self._transfer_key, self._reply_seq, msg)))
+                OUTBOX_PROTOCOL, self._frame_key, self._reply_seq, msg)))
         except OSError:
             pass
 
@@ -491,6 +496,7 @@ class OutboxLink:
         self._last_error = ""
         self._send_seq = 0  # host -> server request frames
         self._expect_seq = 0  # server -> host reply frames
+        self._frame_key = b""
 
     def start(self) -> None:
         if self._thread is None:
@@ -530,7 +536,7 @@ class OutboxLink:
             try:
                 sock.settimeout(self._timeout)
                 sock.sendall(_frame(frame_signed(
-                    OUTBOX_PROTOCOL, self._transfer_key, self._send_seq,
+                    OUTBOX_PROTOCOL, self._frame_key, self._send_seq,
                     {"type": "deliver", "delivery_id": delivery_id,
                      "service": service, "recipient": recipient,
                      "payload_digest": payload_digest,
@@ -547,7 +553,7 @@ class OutboxLink:
                 raise OutboxUncertain(self._last_error) from exc
             with self._io_lock:
                 expect = self._expect_seq + 1
-            if not frame_is_authed(reply, OUTBOX_PROTOCOL, self._transfer_key):
+            if not frame_is_authed(reply, OUTBOX_PROTOCOL, self._frame_key):
                 self._connected = False
                 self._last_error = "outbox reply failed authentication"
                 self._drop_session(sock)
@@ -608,6 +614,10 @@ class OutboxLink:
                     self._transfer_key, challenge["challenge"]):
                 raise OutboxUnavailable("challenge failed authentication")
             nonce = new_id("ob-")
+            frame_key = derive_session_key(
+                OUTBOX_PROTOCOL, self._transfer_key,
+                challenge["challenge"], nonce,
+            )
             sock.sendall(_frame({"type": "hello", "version": OUTBOX_PROTOCOL,
                                  "challenge": challenge["challenge"],
                                  "nonce": nonce,
@@ -617,7 +627,7 @@ class OutboxLink:
             reply = _read_frame(sock)
             if reply.get("type") != "hello_ok":
                 raise OutboxUnavailable(f"hello refused: {reply!r}")
-            if not frame_is_authed(reply, OUTBOX_PROTOCOL, self._transfer_key):
+            if not frame_is_authed(reply, OUTBOX_PROTOCOL, frame_key):
                 raise OutboxUnavailable("hello_ok failed authentication")
             if reply.get("seq") != 1:
                 raise OutboxUnavailable(
@@ -629,6 +639,7 @@ class OutboxLink:
             with self._io_lock:
                 self._send_seq = 0
                 self._expect_seq = 1  # hello_ok consumed reply seq 1
+                self._frame_key = frame_key
         except Exception:
             try:
                 sock.close()

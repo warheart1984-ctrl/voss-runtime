@@ -203,10 +203,16 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
     reply(&mut stream, &guard_challenge_frame(&inner.transfer_key, &inner.challenge));
     let mut phase = "hello";
     let mut auth_seq = 1i64;
+    let mut frame_key: Option<Vec<u8>> = None;
+    let mut reply_seq = 0i64;
     let mut conn_tick: Option<i64> = None;
     while !inner.stop.load(Ordering::SeqCst) {
         if inner.state.lock().expect("guard state").triggered {
-            reply(&mut stream, &ack("triggered", None));
+            if let Some(key) = frame_key.as_deref() {
+                reply_session(&mut stream, key, &mut reply_seq, &ack("triggered", None));
+            } else {
+                reply(&mut stream, &ack("triggered", None));
+            }
             break;
         }
         let message = match relay::read_frame(&mut stream) {
@@ -229,15 +235,22 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
                 break;
             }
             write_control(&inner.control_path, "guard_hello_ok", "guard");
-            reply(&mut stream, &ack("ok", None));
+            let nonce = message.get("nonce").and_then(Json::as_str).unwrap_or("");
+            frame_key = Some(relay::derive_session_key(
+                GUARD_PROTOCOL,
+                &inner.transfer_key,
+                &inner.challenge,
+                nonce,
+            ));
+            reply_session(&mut stream, frame_key.as_deref().expect("frame key"), &mut reply_seq, &ack("ok", None));
             phase = "guard";
             auth_seq = 1;
             inner.state.lock().expect("guard state").last_heartbeat = Some(Instant::now());
             continue;
         }
-        if !relay::frame_is_authed(&message, GUARD_PROTOCOL, &inner.transfer_key) {
+        if !frame_key.as_deref().is_some_and(|key| relay::frame_is_authed(&message, GUARD_PROTOCOL, key)) {
             write_control(&inner.control_path, "guard_anomaly", "unauthenticated frame");
-            reply(&mut stream, &ack("error", Some("denied_guard_auth")));
+            reply_session(&mut stream, frame_key.as_deref().expect("frame key"), &mut reply_seq, &ack("error", Some("denied_guard_auth")));
             break;
         }
         if message.get("seq").and_then(Json::as_i64) != Some(auth_seq) {
@@ -246,18 +259,18 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
                 "guard_anomaly",
                 &format!("sequence_error expected {auth_seq}"),
             );
-            reply(&mut stream, &ack("error", Some("sequence_error")));
+            reply_session(&mut stream, frame_key.as_deref().expect("frame key"), &mut reply_seq, &ack("error", Some("sequence_error")));
             break;
         }
         auth_seq += 1;
         match message.get("type").and_then(Json::as_str) {
             Some("register") => {
                 if inner.state.lock().expect("guard state").registered {
-                    reply(&mut stream, &ack("error", Some("guard_already_registered")));
+                    reply_session(&mut stream, frame_key.as_deref().expect("frame key"), &mut reply_seq, &ack("error", Some("guard_already_registered")));
                     break;
                 }
                 let Some(pid) = positive_u32(message.get("pid")) else {
-                    reply(&mut stream, &ack("error", Some("invalid_pid")));
+                    reply_session(&mut stream, frame_key.as_deref().expect("frame key"), &mut reply_seq, &ack("error", Some("invalid_pid")));
                     break;
                 };
                 {
@@ -267,11 +280,11 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
                     state.last_heartbeat = Some(Instant::now());
                 }
                 write_control(&inner.control_path, "guard_register", &format!("pid={pid}"));
-                reply(&mut stream, &ack("ok", None));
+                reply_session(&mut stream, frame_key.as_deref().expect("frame key"), &mut reply_seq, &ack("ok", None));
             }
             Some("heartbeat") => {
                 let Some(tick) = nonneg_i64(message.get("tick")) else {
-                    reply(&mut stream, &ack("error", Some("invalid_tick")));
+                    reply_session(&mut stream, frame_key.as_deref().expect("frame key"), &mut reply_seq, &ack("error", Some("invalid_tick")));
                     break;
                 };
                 if conn_tick.is_some_and(|previous| tick <= previous) {
@@ -280,12 +293,12 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
                         "guard_anomaly",
                         &format!("heartbeat tick regressed {}->{tick}", conn_tick.unwrap_or(0)),
                     );
-                    reply(&mut stream, &ack("error", Some("tick_regression")));
+                    reply_session(&mut stream, frame_key.as_deref().expect("frame key"), &mut reply_seq, &ack("error", Some("tick_regression")));
                     break;
                 }
                 conn_tick = Some(tick);
                 inner.state.lock().expect("guard state").last_heartbeat = Some(Instant::now());
-                reply(&mut stream, &ack("ok", None));
+                reply_session(&mut stream, frame_key.as_deref().expect("frame key"), &mut reply_seq, &ack("ok", None));
             }
             Some("terminate") => {
                 let pid = {
@@ -299,11 +312,11 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
                 if let Some(pid) = pid {
                     kill_pid(pid, "guarded worker", &format!("explicit terminate directive ({reason})"), &inner.control_path);
                 }
-                reply(&mut stream, &ack("triggered", None));
+                reply_session(&mut stream, frame_key.as_deref().expect("frame key"), &mut reply_seq, &ack("triggered", None));
                 break;
             }
             _ => {
-                reply(&mut stream, &ack("error", Some("unknown_guard_frame")));
+                reply_session(&mut stream, frame_key.as_deref().expect("frame key"), &mut reply_seq, &ack("error", Some("unknown_guard_frame")));
                 break;
             }
         }
@@ -421,6 +434,13 @@ fn reply(stream: &mut TcpStream, message: &Json) {
     }
 }
 
+fn reply_session(stream: &mut TcpStream, key: &[u8], sequence: &mut i64, message: &Json) {
+    *sequence += 1;
+    if let Ok(signed) = relay::frame_signed(GUARD_PROTOCOL, key, *sequence, message) {
+        reply(stream, &signed);
+    }
+}
+
 fn graceful_close(mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
     let mut buffer = [0u8; 65536];
@@ -452,6 +472,8 @@ struct LinkState {
     triggered: bool,
     failed: bool,
     last_error: String,
+    frame_key: Vec<u8>,
+    expect_seq: i64,
 }
 
 struct LinkInner {
@@ -500,6 +522,8 @@ impl WatchGuardLink {
                     triggered: false,
                     failed: false,
                     last_error: String::new(),
+                    frame_key: Vec::new(),
+                    expect_seq: 0,
                 }),
                 socket: Mutex::new(None),
                 on_failure: Mutex::new(None),
@@ -562,7 +586,7 @@ impl WatchGuardLink {
                     ("type", Json::string("terminate")),
                 ]))?;
                 send_frame(sock, &signed)?;
-                relay::read_frame(sock).map_err(|error| error.to_string())
+                read_session_reply(&self.inner, sock)
             })()
         };
         match reply {
@@ -626,7 +650,11 @@ fn run_link(inner: Arc<LinkInner>) {
 }
 
 fn session(inner: &LinkInner) -> Result<(), String> {
-    inner.state.lock().expect("guard link").send_seq = 0;
+    {
+        let mut state = inner.state.lock().expect("guard link");
+        state.send_seq = 0;
+        state.expect_seq = 0;
+    }
     connect(inner)?;
     let result = pump(inner);
     disconnect(inner);
@@ -656,7 +684,7 @@ fn pump(inner: &LinkInner) -> Result<(), String> {
                     ("type", Json::string("register")),
                 ]))?;
                 send_frame(sock, &signed)?;
-                let reply = relay::read_frame(sock).map_err(|error| error.to_string())?;
+                let reply = read_session_reply(inner, sock)?;
                 if reply.get("status").and_then(Json::as_str) != Some("ok") {
                     return Err(format!("register refused: {reply:?}"));
                 }
@@ -671,7 +699,7 @@ fn pump(inner: &LinkInner) -> Result<(), String> {
                 ("type", Json::string("heartbeat")),
             ]))?;
             send_frame(sock, &signed)?;
-            relay::read_frame(sock).map_err(|error| error.to_string())?
+            read_session_reply(inner, sock)?
         };
         match reply.get("status").and_then(Json::as_str) {
             Some("triggered") => {
@@ -707,6 +735,12 @@ fn connect(inner: &LinkInner) -> Result<(), String> {
         return Err("challenge failed authentication".to_string());
     }
     let nonce = new_id("guard-");
+    let session_key = relay::derive_session_key(
+        GUARD_PROTOCOL,
+        &inner.transfer_key,
+        challenge_value,
+        &nonce,
+    );
     send_frame(&mut stream, &Json::object([
         ("challenge", Json::string(challenge_value)),
         ("mac", Json::string(sign_guard_hello(&inner.transfer_key, &nonce, challenge_value))),
@@ -714,7 +748,12 @@ fn connect(inner: &LinkInner) -> Result<(), String> {
         ("type", Json::string("hello")),
         ("version", Json::string(GUARD_PROTOCOL)),
     ]))?;
-    let reply = relay::read_frame(&mut stream).map_err(|error| error.to_string())?;
+    {
+        let mut state = inner.state.lock().expect("guard link");
+        state.frame_key = session_key;
+        state.expect_seq = 0;
+    }
+    let reply = read_session_reply(inner, &mut stream)?;
     if reply.get("status").and_then(Json::as_str) != Some("ok") {
         return Err(format!("hello refused: {reply:?}"));
     }
@@ -782,13 +821,28 @@ fn wait_tick(inner: &LinkInner) {
     }
 }
 
+fn read_session_reply(inner: &LinkInner, stream: &mut TcpStream) -> Result<Json, String> {
+    let reply = relay::read_frame(stream).map_err(|error| error.to_string())?;
+    let (key, expected) = {
+        let state = inner.state.lock().expect("guard link");
+        (state.frame_key.clone(), state.expect_seq + 1)
+    };
+    if !relay::frame_is_authed(&reply, GUARD_PROTOCOL, &key)
+        || reply.get("seq").and_then(Json::as_i64) != Some(expected)
+    {
+        return Err(format!("guard reply failed authentication (expected seq {expected})"));
+    }
+    inner.state.lock().expect("guard link").expect_seq = expected;
+    Ok(reply)
+}
+
 fn next_signed(inner: &LinkInner, message: &Json) -> Result<Json, String> {
-    let seq = {
+    let (seq, frame_key) = {
         let mut state = inner.state.lock().expect("guard link");
         state.send_seq += 1;
-        state.send_seq
+        (state.send_seq, state.frame_key.clone())
     };
-    relay::frame_signed(GUARD_PROTOCOL, &inner.transfer_key, seq, message)
+    relay::frame_signed(GUARD_PROTOCOL, &frame_key, seq, message)
 }
 
 fn claim_hello(inner: &ServerInner, message: &Json) -> Option<&'static str> {

@@ -120,6 +120,16 @@ def frame_signed(protocol: str, transfer_key: bytes, seq: int,
     return body
 
 
+def derive_session_key(protocol: str, transfer_key: bytes,
+                       challenge: str, nonce: str) -> bytes:
+    """Derive a fresh frame key from the authenticated process challenge and hello nonce."""
+    fields = (b"voss.session-key.v1", protocol.encode("ascii"),
+              challenge.encode("ascii"), nonce.encode("ascii"))
+    material = b"".join(len(field).to_bytes(4, "big") + field
+                       for field in fields)
+    return hmac.new(transfer_key, material, hashlib.sha256).digest()
+
+
 def frame_is_authed(msg: Any, protocol: str, transfer_key: bytes) -> bool:
     """A frame only authenticates if its MAC covers every field but itself."""
     if not isinstance(msg, dict):
@@ -213,6 +223,7 @@ class AuditRelayServer:
         # guards re-use within one process lifetime.
         self._challenge = new_id("challenge-")
         self._seen_nonces: set = set()  # single-use hello nonces, this process only
+        self._frame_key = b""
 
         # Rebuild store head + event_id index so redeliveries are idempotent.
         # Compromised starts clear and is set only by load or a later violation.
@@ -348,10 +359,16 @@ class AuditRelayServer:
         phase = "hello"
         expected_seq = 0
         auth_seq = 1  # post-hello stanzas are numbered 1..; replays/gaps clamp
+        self._reply_seq = 0
+        self._frame_key = b""
         try:
             while not self._stop.is_set():
                 if self._compromised:
-                    self._reply(conn, {"type": "refused", "reason": "relay_compromised"})
+                    refused = {"type": "refused", "reason": "relay_compromised"}
+                    if self._frame_key:
+                        self._reply_session(conn, refused)
+                    else:
+                        self._reply(conn, refused)
                     return
                 try:
                     msg = _read_frame(conn)
@@ -392,17 +409,22 @@ class AuditRelayServer:
                         self._reply(conn, {"type": "violation",
                                            "reason": "denied_hello_auth"})
                         return
+                    nonce = str(msg.get("nonce", ""))
+                    self._frame_key = derive_session_key(
+                        RELAY_PROTOCOL, self._transfer_key, self._challenge,
+                        nonce,
+                    )
                     _write_control(self.control_path, "relay_accepted_hello",
                                    "authenticated host connected")
-                    self._reply(conn, {"type": "hello_ok",
-                                       "nonce": msg.get("nonce", "")})
+                    self._reply_session(conn, {
+                        "type": "hello_ok", "nonce": msg.get("nonce", "")})
                     phase = "stream_begin"
                 elif phase == "stream_begin":
                     if msg.get("type") != "stream_begin":
                         self._violate(conn, "expected_stream_begin")
                         return
                     if not frame_is_authed(msg, RELAY_PROTOCOL,
-                                           self._transfer_key):
+                                           self._frame_key):
                         self._violate(conn, "stream_begin_auth")
                         return
                     if msg.get("seq") != auth_seq:
@@ -412,14 +434,15 @@ class AuditRelayServer:
                         )
                         return
                     auth_seq += 1
-                    self._reply(conn, {"type": "stream_ready",
-                                       "chain_len": self._stored_count,
-                                       "head": self._head})
-                    expected_seq = 0
+                    self._reply_session(conn, {
+                        "type": "stream_ready",
+                        "chain_len": self._stored_count,
+                        "head": self._head})
+                    expected_seq = 1
                     phase = "records"
                 else:
                     if not frame_is_authed(msg, RELAY_PROTOCOL,
-                                           self._transfer_key):
+                                           self._frame_key):
                         self._violate(conn, "record_auth")
                         return
                     expected_seq += 1
@@ -480,8 +503,9 @@ class AuditRelayServer:
             if existing != record:
                 self._violate(conn, f"duplicate_contradiction:{event_id}")
                 return
-            self._reply(conn, {"type": "ack", "seq": msg.get("seq"),
-                               "dup": True, "chain_len": self._stored_count})
+            self._reply_session(conn, {
+                "type": "ack", "request_seq": msg.get("seq"),
+                "dup": True, "chain_len": self._stored_count})
             return
         mac, chain = _verify_record(record, self._head, self._keyring)
         line_record = {
@@ -497,14 +521,24 @@ class AuditRelayServer:
             with open(self.store_path, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(line_record, sort_keys=True) + "\n")
                 handle.flush()
-        self._reply(conn, {"type": "ack", "seq": msg.get("seq"),
-                           "dup": False, "chain_len": self._stored_count})
+        self._reply_session(conn, {
+            "type": "ack", "request_seq": msg.get("seq"),
+            "dup": False, "chain_len": self._stored_count})
 
     def _violate(self, conn: socket.socket, reason: str) -> None:
         with self._lock:
             self._compromised = True
         _write_control(self.control_path, "relay_violation", reason)
-        self._reply(conn, {"type": "violation", "reason": reason})
+        if self._frame_key:
+            self._reply_session(conn, {"type": "violation", "reason": reason})
+        else:
+            self._reply(conn, {"type": "violation", "reason": reason})
+
+    def _reply_session(self, conn: socket.socket,
+                       msg: Dict[str, Any]) -> None:
+        self._reply_seq += 1
+        self._reply(conn, frame_signed(
+            RELAY_PROTOCOL, self._frame_key, self._reply_seq, msg))
 
     def _reply(self, conn: socket.socket, msg: Dict[str, Any]) -> None:
         try:
@@ -605,6 +639,10 @@ class AuditRelayClient:
                     self._transfer_key, challenge["challenge"]):
                 raise RelayViolationError("challenge failed authentication")
             nonce = new_id("relay-")
+            frame_key = derive_session_key(
+                RELAY_PROTOCOL, self._transfer_key,
+                challenge["challenge"], nonce,
+            )
             self._frame_send(conn, {
                 "type": "hello", "version": RELAY_PROTOCOL,
                 "challenge": challenge["challenge"], "nonce": nonce,
@@ -614,17 +652,25 @@ class AuditRelayClient:
             reply = _read_frame(conn)
             if reply.get("type") != "hello_ok":
                 raise RelayViolationError(f"hello rejected: {reply!r}")
+            reply_seq = 1
+            if (not frame_is_authed(reply, RELAY_PROTOCOL, frame_key) or
+                    reply.get("seq") != reply_seq):
+                raise RelayViolationError("hello_ok failed authentication")
             self._frame_send(conn, frame_signed(
-                RELAY_PROTOCOL, self._transfer_key, 1,
+                RELAY_PROTOCOL, frame_key, 1,
                 {"type": "stream_begin"}))
             ready = _read_frame(conn)
             if ready.get("type") != "stream_ready":
                 raise RelayViolationError(f"stream rejected: {ready!r}")
+            reply_seq += 1
+            if (not frame_is_authed(ready, RELAY_PROTOCOL, frame_key) or
+                    ready.get("seq") != reply_seq):
+                raise RelayViolationError("stream_ready failed authentication")
 
             # Re-deliver everything from the start (idempotent); cursor is 0
             # on every connect so a connection loss can never strand records.
             self._cursor = 0
-            self._seq = 0
+            self._seq = 1
             self.connected = True
             self.last_error = ""
             while True:
@@ -632,13 +678,19 @@ class AuditRelayClient:
                     self._seq += 1
                     record = loads_strict(line).get("record")
                     self._frame_send(conn, frame_signed(
-                        RELAY_PROTOCOL, self._transfer_key, self._seq,
+                        RELAY_PROTOCOL, frame_key, self._seq,
                         {"type": "record", "record": record}))
                     ack = _read_frame(conn)
+                    reply_seq += 1
+                    if (not frame_is_authed(ack, RELAY_PROTOCOL, frame_key) or
+                            ack.get("seq") != reply_seq):
+                        raise RelayViolationError("relay ack failed authentication")
                     if ack.get("type") == "violation":
                         raise RelayViolationError(f"relay: {ack.get('reason')}")
                     if ack.get("type") != "ack":
                         raise RelayViolationError(f"unexpected relay reply: {ack!r}")
+                    if ack.get("request_seq") != self._seq:
+                        raise RelayViolationError("relay ack request sequence mismatch")
                     if ack.get("dup"):
                         self.last_ack_dup_count += 1
                     else:
