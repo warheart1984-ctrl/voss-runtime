@@ -3,8 +3,9 @@
 A runnable prototype of a **governance engine for model adapters**: it routes
 declared worker actions through a signed, default-deny policy and explicit,
 bound human approval, and records them in an authenticated audit log with a
-separate relay copy. The current worker boundary is behavioral; OS-level
-confinement is still a production requirement.
+separate relay copy. On Windows, the worker also runs in a Job Object limited
+to one active process and terminated when the job closes. It still runs as the
+host user and has no AppContainer, file-system, or network isolation.
 
 This is a prototype for demonstration and adversarial testing, not production
 deployment. Full design notes, threat model, known limitations, and RFC mapping
@@ -34,6 +35,45 @@ would require a clause-level crosswalk, implementation and deployment
 evidence, documented exceptions, and independent review. See
 [`PROTOTYPE.md`](PROTOTYPE.md) for current limits and
 [`ARCHITECTURE-NEXT-STEPS.md`](ARCHITECTURE-NEXT-STEPS.md) for proposed work.
+
+## European Union: AI Act and standards
+
+This is an engineering map, not a legal classification or conformity claim.
+Whether the EU AI Act applies, and which duties apply, depends on the system's
+intended purpose, risk category, and the organization's role as provider or
+deployer. The repository alone does not establish those facts. Voss is a
+governance runtime; it does not replace obligations held by the provider or
+deployer of an integrated AI system.
+
+| EU AI Act area | Voss mapping | Current evidence and gap |
+|---|---|---|
+| Risk management (Article 9) | The Binding and technical specification define risks, policy limits, approvals, containment, and change control. | A deployment-specific risk process, assessment evidence, and ongoing review still need to be established. |
+| Technical documentation and records (Articles 11–12) | The specification, prototype documentation, authenticated audit chain, WAL, and relay support traceability. | These do not yet amount to a complete system technical file, deployment record, or retention policy. |
+| Human oversight (Article 14) | Human approval gates and the human-sovereignty principle support oversight by design. | The documented approval boundary has limits if the host is compromised; system-level oversight and operator procedures still need evidence. |
+| Accuracy, robustness, and cybersecurity (Article 15) | Signed service frames, fail-closed decisions, and Windows Job Object process containment address parts of robustness and security. | The worker still runs as the host user and lacks AppContainer, file-system, or network isolation. Independently trusted controls and deployment-specific security evidence remain gaps. |
+| Quality management (Article 17) | Binding versioning and amendment controls provide governance structure. | The repository does not demonstrate an organization-wide quality management system. |
+| Data governance and transparency | Voss can govern runtime actions and retain evidence around a model. | It does not itself establish model training-data governance or satisfy all user-facing transparency duties; these depend on the integrated system and use. |
+
+EU harmonised standards are voluntary. A standard provides a presumption of
+conformity only for requirements it covers after its reference is published in
+the Official Journal. As of 2026-09-24, EN 18286:2026 has been adopted and
+published, but the Commission's assessment is ongoing; do not present it as
+proof of conformity. prEN 18228 (AI risk management) is still in development.
+See the [Commission's standardisation guidance](https://digital-strategy.ec.europa.eu/en/policies/ai-act-standardisation)
+and [current standards status](https://interoperable-europe.ec.europa.eu/collection/ai-public-sector/ai-standards-and-tools).
+
+The Commission's current timeline applies AI Act provisions in stages:
+transparency provisions from 2 August 2026, high-risk Annex III rules from
+2 December 2027, and high-risk AI embedded in regulated products under Annex I
+from 2 August 2028. Applicability and duties depend on classification and role;
+see the [Commission's AI Act overview](https://digital-strategy.ec.europa.eu/en/policies/regulatory-framework-ai)
+and the [Regulation text](https://eur-lex.europa.eu/eli/reg/2024/1689/2026-07-27/eng/pdf).
+Where personal data is processed, assess GDPR separately.
+
+A practical readiness step is a clause-level evidence matrix: applicable legal
+requirement, Voss requirement, implemented control, test or operational
+evidence, owner, and remaining gap. Start by documenting intended purpose and
+provider/deployer role, then determine which AI Act requirements apply.
 
 ```
                     ┌────────────────────────────────────────────────┐
