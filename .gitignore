@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# runtime secrets / state (never committed)
+keys.json
+identity.json
+worker-bootstrap.json
+keys/
+*.jsonl
+
+# generated artifacts
+*.log
