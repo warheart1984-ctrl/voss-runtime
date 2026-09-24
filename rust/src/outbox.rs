@@ -69,6 +69,7 @@ struct Store {
     seen_nonces: HashSet<String>, // this process only; not persisted
     auth_seq: i64,
     reply_seq: i64,
+    frame_key: Vec<u8>,
 }
 
 struct ServerInner {
@@ -125,6 +126,7 @@ impl OutboxServer {
                 seen_nonces: HashSet::new(),
                 auth_seq: 0,
                 reply_seq: 0,
+                frame_key: Vec::new(),
             }),
             stop: AtomicBool::new(false),
             active: AtomicBool::new(false),
@@ -206,10 +208,18 @@ fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStrea
         reply(&mut stream, &ack_error("denied_outbox_auth"));
         return stream;
     }
+    let nonce = hello.get("nonce").and_then(Json::as_str).unwrap_or("");
+    let frame_key = relay::derive_session_key(
+        OUTBOX_PROTOCOL,
+        &inner.transfer_key,
+        &inner.challenge,
+        nonce,
+    );
     {
         let mut store = inner.store.lock().expect("outbox store");
         store.auth_seq = 0;
         store.reply_seq = 0;
+        store.frame_key = frame_key;
     }
     write_control(&inner.control_path, "outbox_accepted_hello", "host");
     if !reply_signed(&inner, &mut stream, &Json::object([("type", Json::string("hello_ok"))])) {
@@ -225,7 +235,7 @@ fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStrea
                 return stream;
             }
         };
-        if !relay::frame_is_authed(&message, OUTBOX_PROTOCOL, &inner.transfer_key) {
+        if !relay::frame_is_authed(&message, OUTBOX_PROTOCOL, &inner.store.lock().expect("outbox store").frame_key) {
             write_control(&inner.control_path, "outbox_anomaly", "unauthenticated frame");
             return stream;
         }
@@ -286,7 +296,8 @@ fn reply_signed(inner: &ServerInner, stream: &mut TcpStream, message: &Json) -> 
         store.reply_seq += 1;
         store.reply_seq
     };
-    let Ok(signed) = relay::frame_signed(OUTBOX_PROTOCOL, &inner.transfer_key, seq, message) else {
+    let key = inner.store.lock().expect("outbox store").frame_key.clone();
+    let Ok(signed) = relay::frame_signed(OUTBOX_PROTOCOL, &key, seq, message) else {
         return false;
     };
     reply(stream, &signed);
@@ -558,6 +569,7 @@ struct LinkState {
     last_error: String,
     send_seq: i64,
     expect_seq: i64,
+    frame_key: Vec<u8>,
 }
 
 struct LinkInner {
@@ -595,6 +607,7 @@ impl OutboxLink {
                     last_error: String::new(),
                     send_seq: 0,
                     expect_seq: 0,
+                    frame_key: Vec::new(),
                 }),
             }),
             thread: Mutex::new(None),
@@ -656,7 +669,7 @@ impl OutboxLink {
         let send_seq = state.send_seq;
         let message = match relay::frame_signed(
             OUTBOX_PROTOCOL,
-            &self.inner.transfer_key,
+            &state.frame_key,
             send_seq,
             &Json::object([
                 ("delivery_id", Json::string(delivery_id)),
@@ -688,7 +701,7 @@ impl OutboxLink {
                 return Err(OutboxError::Uncertain(state.last_error.clone()));
             }
         };
-        if !relay::frame_is_authed(&reply, OUTBOX_PROTOCOL, &self.inner.transfer_key) {
+        if !relay::frame_is_authed(&reply, OUTBOX_PROTOCOL, &state.frame_key) {
             return Err(OutboxError::Uncertain("reply failed authentication".to_string()));
         }
         if reply.get("type").and_then(Json::as_str) != Some("delivered") {
@@ -759,6 +772,12 @@ fn open_session(inner: &LinkInner, state: &mut LinkState) -> Result<(), String> 
         return Err("challenge failed authentication".to_string());
     }
     let nonce = new_id("ob-");
+    let session_key = relay::derive_session_key(
+        OUTBOX_PROTOCOL,
+        &inner.transfer_key,
+        challenge_value,
+        &nonce,
+    );
     let hello = Json::object([
         ("challenge", Json::string(challenge_value)),
         ("mac", Json::string(sign_outbox_hello(&inner.transfer_key, &nonce, challenge_value))),
@@ -771,7 +790,7 @@ fn open_session(inner: &LinkInner, state: &mut LinkState) -> Result<(), String> 
         if reply.get("type").and_then(Json::as_str) != Some("hello_ok") {
             return Err(format!("hello refused: {reply:?}"));
         }
-        if !relay::frame_is_authed(&reply, OUTBOX_PROTOCOL, &inner.transfer_key) {
+        if !relay::frame_is_authed(&reply, OUTBOX_PROTOCOL, &session_key) {
             return Err("hello_ok failed authentication".to_string());
         }
         if reply.get("seq").and_then(Json::as_i64) != Some(1) {
@@ -782,8 +801,9 @@ fn open_session(inner: &LinkInner, state: &mut LinkState) -> Result<(), String> 
         let _ = stream.shutdown(Shutdown::Both);
         return Err(error);
     }
-    state.send_seq = 0;
-    state.expect_seq = 1;
+        state.send_seq = 0;
+        state.expect_seq = 1;
+        state.frame_key = session_key;
     state.stream = Some(stream);
     state.connected = true;
     state.ever_connected = true;

@@ -131,6 +131,7 @@ Data crossing the boundary:
 | Vendor-neutral model adapter (RFC 8) | `FakeModel` is a plain Python class that maps prompts to proposal envelopes; any vendor adapter speaking the stdin protocol slots in | `worker.py`, `test_worker_standalone_produces_only_proposals` |
 | Grant state survives restart; tamper fails closed (RFC 5.5) | Write-ahead ledger (`wal.py`) chains every flow/capability/consumption mutation on the same HMAC chain as audit; on boot the runtime replays the verified ledger (`runtime._recover_state`) and, for identity/session + keys, reuses the persisted identity/`keys.json`; a tampered ledger is never trusted — no grants are restored and the worker is suspended | `test_wal.py` |
 | Authenticated adapter<->host transport (RFC 9.2, Binding 4.1) | Every message both ways is HMAC-SHA256 over canonical JSON with a per-spawn key + channel session id; per-direction monotonic sequence; handshake (`hello`/`hello_ok`); 64 KiB line cap; worker refuses to run without a provisioned credential. Forgery/replay/out-of-sequence/wrong-direction/oversize -> audit `transport_denied` + immediate suspend/revoke | `test_chan.py`, `test_transport.py`, `test_worker_isolation.py` |
+| Fresh session keys for local service links | Relay, console, outbox, and watch-guard derive a connection-scoped HMAC key from the transfer key, authenticated process challenge, protocol tag, and fresh hello nonce. Every post-hello frame in both directions, including hello acknowledgements, is MAC-checked with independent monotonic counters. The transfer key authenticates only challenge/hello setup. | Existing relay, console, outbox, and watch-guard protocol tests (updated; not run in this change) |
 | Crash mid-flight never grants nor double-executes (RFC 5.5) | Crash-injection seams (`crashpoint.py`) kill the runtime at each ledger boundary via subprocess driver; reopen proves recovery restores exactly the right state: pending flow re-approvable, granted flow without capability grants nothing extra, issued-but-unused capability executes exactly once, request-executed marker blocks every replay, and an effect already performed is never re-run. A crash mid-append of a WAL record is tolerated by trimming the single incomplete last record; any mid-file break still fails closed | `test_crashpoints.py` |
 | Audit survives in a separate write-only store (RFC 9.1) | `relay.py` re-verifies and independently re-chains each audit record in its own process; the relay store is byte-identical to the host audit copy, `verify_integrity()` passes on it, host restart redelivers idempotently (dup-acked), and any probe without the transfer key, oversized frame, sequence gap, or contradictory redelivery is refused and fails the store closed | `test_relay.py` |
 | External action accounting process (RFC 12 prototype) | Optional `OutboxLink` sends simulated deliveries to a separate service. The service rebuilds idempotency state from its receipt ledger on restart, rejects reuse of an idempotency key with a different target or payload digest, fsyncs each receipt before acknowledging it, and refuses new deliveries on ledger storage failure. This remains a local stdlib demo, not real provider delivery or hardened remote accounting | `test_outbox.py` |
@@ -252,6 +253,14 @@ Any other action string is not registered and is denied at the normalizer
    64 KiB line cap bounds message size, but a persistently silent or streaming
    peer can still occupy the pipe until the read deadline; production needs
    non-blocking IO and OS-enforced quotas (see also §5 DoS scope).
+9. **Local service-link session keys are process-local.** Relay, console,
+   outbox, and watch-guard derive a distinct frame key for each accepted
+   hello from the authenticated challenge and a fresh nonce. The transfer key
+   remains a bootstrap credential used to authenticate that exchange; all
+   post-hello frames, including server replies, use the derived key and a
+   per-direction sequence. The key is not persisted. This limits cross-session
+   frame replay, but does not replace OS ACLs, protect a compromised endpoint,
+   or prove that the human saw an authentic display outside this prototype.
 
 ### Deliberate prototype simplifications (call-outs for reviewers)
 - `_clean_env` scrubs variables whose *names* match secret-like fragments; it

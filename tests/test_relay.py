@@ -29,6 +29,8 @@ from voss.relay import (
     _read_frame,
     _sign_challenge,
     _sign_hello,
+    derive_session_key,
+    frame_is_authed,
     frame_signed,
 )
 from voss.canonical import new_id
@@ -116,7 +118,7 @@ def _control_details(store, event_prefix):
 
 
 def _sock_handshake(port, transfer_key):
-    """Open a low-level client, auth it, and return (socket, ready dict)."""
+    """Open a low-level client and return socket, ready reply, and session key."""
     s = socket.create_connection(("127.0.0.1", port), timeout=5.0)
     challenge = _read_frame(s)
     assert challenge.get("type") == "challenge", challenge
@@ -125,13 +127,19 @@ def _sock_handshake(port, transfer_key):
                       "challenge": challenge["challenge"], "nonce": nonce,
                       "mac": _sign_hello(transfer_key, nonce,
                                          challenge["challenge"])}))
+    frame_key = derive_session_key(
+        RELAY_PROTOCOL, transfer_key, challenge["challenge"], nonce)
     reply = _read_frame(s)
     assert reply.get("type") == "hello_ok", reply
+    assert frame_is_authed(reply, RELAY_PROTOCOL, frame_key), reply
+    assert reply.get("seq") == 1, reply
     s.sendall(_frame(frame_signed(
-        RELAY_PROTOCOL, transfer_key, 1, {"type": "stream_begin"})))
+        RELAY_PROTOCOL, frame_key, 1, {"type": "stream_begin"})))
     ready = _read_frame(s)
     assert ready.get("type") == "stream_ready", ready
-    return s, ready
+    assert frame_is_authed(ready, RELAY_PROTOCOL, frame_key), ready
+    assert ready.get("seq") == 2, ready
+    return s, ready, frame_key
 
 
 def _raw_record(event_id, content="val"):
@@ -244,9 +252,9 @@ class RelayAdversarialTest(unittest.TestCase):
         self.assertNotIn("relay_violation", _control_events(self.store))
 
     def test_sequence_gap_compromises_store(self) -> None:
-        s, _ready = _sock_handshake(self.port, self.key)
+        s, _ready, frame_key = _sock_handshake(self.port, self.key)
         s.sendall(_frame(frame_signed(
-            RELAY_PROTOCOL, self.key, 5,
+            RELAY_PROTOCOL, frame_key, 5,
             {"type": "record", "record": _raw_record("evt-gap")})))
         reply = _read_frame(s)
         self.assertEqual(reply.get("type"), "violation")
@@ -267,13 +275,13 @@ class RelayAdversarialTest(unittest.TestCase):
         s2.close()
 
     def test_duplicate_contradiction_fails_closed(self) -> None:
-        s, _ready = _sock_handshake(self.port, self.key)
+        s, _ready, frame_key = _sock_handshake(self.port, self.key)
         s.sendall(_frame(frame_signed(
-            RELAY_PROTOCOL, self.key, 1,
+            RELAY_PROTOCOL, frame_key, 2,
             {"type": "record", "record": _raw_record("evt-dup", "v1")})))
         self.assertEqual(_read_frame(s).get("type"), "ack")
         s.sendall(_frame(frame_signed(
-            RELAY_PROTOCOL, self.key, 2,
+            RELAY_PROTOCOL, frame_key, 3,
             {"type": "record", "record": _raw_record("evt-dup", "v2")})))
         reply = _read_frame(s)
         self.assertEqual(reply.get("type"), "violation")
@@ -342,7 +350,7 @@ class RelayStaleTest(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="voss-relay-")
         proc, store, port, key = _start_relay(tmp, timeout=0.4)
         self.addCleanup(_stop_proc, proc)
-        s, _ready = _sock_handshake(port, key)
+        s, _ready, frame_key = _sock_handshake(port, key)
         # No records: the relay must flag staleness within ~0.4s.
         deadline = time.time() + 5
         while "relay_stale" not in _control_events(store) and time.time() < deadline:
@@ -350,7 +358,7 @@ class RelayStaleTest(unittest.TestCase):
         self.assertIn("relay_stale", _control_events(store))
         # A record resumes the stream and marks recovery.
         s.sendall(_frame(frame_signed(
-            RELAY_PROTOCOL, key, 1,
+            RELAY_PROTOCOL, frame_key, 2,
             {"type": "record", "record": _raw_record("evt-live")})))
         self.assertEqual(_read_frame(s).get("type"), "ack")
         deadline = time.time() + 5
@@ -445,7 +453,7 @@ class RelayServerUnitTest(unittest.TestCase):
         self.assertEqual(reply.get("reason"), "denied_hello_auth")
         replay.close()
         # A legit client holding the same key still connects (fresh challenge).
-        s2, _ready = _sock_handshake(second.port, key)
+        s2, _ready, _frame_key = _sock_handshake(second.port, key)
         s2.close()
 
 

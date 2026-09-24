@@ -80,6 +80,7 @@ struct ConsoleAuth {
     seen: HashSet<String>, // hello nonces, this process only
     auth_seq: i64,
     send_seq: i64,
+    frame_key: Vec<u8>,
 }
 
 pub struct ConsoleServer {
@@ -127,6 +128,7 @@ impl ConsoleServer {
                 seen: HashSet::new(),
                 auth_seq: 0,
                 send_seq: 0,
+                frame_key: Vec::new(),
             }),
         });
         Ok(Self {
@@ -211,12 +213,28 @@ fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStrea
         return stream;
     }
     write_control(&inner.control_path, "console_accepted_hello", "host");
-    reply(&mut stream, &Json::object([("type", Json::string("hello_ok"))]));
+    let nonce = hello.get("nonce").and_then(Json::as_str).unwrap_or("");
+    let frame_key = relay::derive_session_key(
+        CONSOLE_PROTOCOL,
+        &inner.transfer_key,
+        &inner.challenge,
+        nonce,
+    );
     {
         let mut auth = inner.auth.lock().expect("console auth");
         auth.auth_seq = 0;
-        auth.send_seq = 0;
+        auth.send_seq = 1;
+        auth.frame_key = frame_key.clone();
     }
+    let Ok(hello_ok) = relay::frame_signed(
+        CONSOLE_PROTOCOL,
+        &frame_key,
+        1,
+        &Json::object([("type", Json::string("hello_ok"))]),
+    ) else {
+        return stream;
+    };
+    reply(&mut stream, &hello_ok);
     {
         let mut slot = inner.conn.lock().expect("console socket");
         *slot = stream.try_clone().ok();
@@ -235,7 +253,7 @@ fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStrea
                 break;
             }
         };
-        if !relay::frame_is_authed(&message, CONSOLE_PROTOCOL, &inner.transfer_key) {
+        if !relay::frame_is_authed(&message, CONSOLE_PROTOCOL, &inner.auth.lock().expect("console auth").frame_key) {
             write_control(&inner.control_path, "console_anomaly", "unauthenticated frame");
             break;
         }
@@ -357,7 +375,8 @@ fn send_conn(inner: &ServerInner, message: &Json) {
         auth.send_seq += 1;
         auth.send_seq
     };
-    let Ok(signed) = relay::frame_signed(CONSOLE_PROTOCOL, &inner.transfer_key, seq, message) else {
+    let key = inner.auth.lock().expect("console auth").frame_key.clone();
+    let Ok(signed) = relay::frame_signed(CONSOLE_PROTOCOL, &key, seq, message) else {
         return;
     };
     let mut slot = inner.conn.lock().expect("console socket");
@@ -398,6 +417,7 @@ struct ClientState {
     last_error: String,
     send_seq: i64,
     expect_seq: i64,
+    frame_key: Vec<u8>,
 }
 
 struct ClientInner {
@@ -438,6 +458,7 @@ impl ConsoleClient {
                     last_error: String::new(),
                     send_seq: 0,
                     expect_seq: 0,
+                    frame_key: Vec::new(),
                 }),
                 writer: Mutex::new(None),
                 on_vote: Mutex::new(None),
@@ -517,12 +538,12 @@ impl ConsoleClient {
     }
 
     fn send_best_effort(&self, message: &Json) {
-        let seq = {
+        let (seq, frame_key) = {
             let mut state = self.inner.state.lock().expect("console client");
             state.send_seq += 1;
-            state.send_seq
+            (state.send_seq, state.frame_key.clone())
         };
-        let Ok(signed) = relay::frame_signed(CONSOLE_PROTOCOL, &self.inner.transfer_key, seq, message) else {
+        let Ok(signed) = relay::frame_signed(CONSOLE_PROTOCOL, &frame_key, seq, message) else {
             return;
         };
         let mut slot = self.inner.writer.lock().expect("console writer");
@@ -591,6 +612,12 @@ fn connect_hello(inner: &ClientInner) -> Result<TcpStream, String> {
         return Err("challenge failed authentication".to_string());
     }
     let nonce = new_id("console-");
+    let session_key = relay::derive_session_key(
+        CONSOLE_PROTOCOL,
+        &inner.transfer_key,
+        challenge_value,
+        &nonce,
+    );
     write_frame(&mut stream, &Json::object([
         ("challenge", Json::string(challenge_value)),
         ("mac", Json::string(sign_console_hello(&inner.transfer_key, &nonce, challenge_value))),
@@ -599,10 +626,15 @@ fn connect_hello(inner: &ClientInner) -> Result<TcpStream, String> {
         ("version", Json::string(CONSOLE_PROTOCOL)),
     ]))?;
     let reply = relay::read_frame(&mut stream).map_err(|error| error.to_string())?;
-    if reply.get("type").and_then(Json::as_str) != Some("hello_ok") {
+    if reply.get("type").and_then(Json::as_str) != Some("hello_ok")
+        || !relay::frame_is_authed(&reply, CONSOLE_PROTOCOL, &session_key)
+        || reply.get("seq").and_then(Json::as_i64) != Some(1)
+    {
         return Err(format!("hello refused: {reply:?}"));
     }
     let mut state = inner.state.lock().expect("console client");
+    state.frame_key = session_key;
+    state.expect_seq = 1;
     state.connected = true;
     state.ever_connected = true;
     state.last_error.clear();
@@ -613,26 +645,23 @@ fn read_votes(inner: &ClientInner, reader: &mut TcpStream) -> Result<(), String>
     while !inner.stop.load(Ordering::SeqCst) {
         let message = relay::read_frame(reader).map_err(|error| error.to_string())?;
         let kind = message.get("type").and_then(Json::as_str);
-        if kind == Some("vote") || kind == Some("terminate") {
-            let expected = {
-                let state = inner.state.lock().expect("console client");
-                state.expect_seq + 1
-            };
-            let valid = relay::frame_is_authed(&message, CONSOLE_PROTOCOL, &inner.transfer_key)
-                && message.get("seq").and_then(Json::as_i64) == Some(expected);
-            if !valid {
-                inner.state.lock().expect("console client").expect_seq += 1;
-                record_error(
-                    inner,
-                    format!(
-                        "console frame failed authentication (seq {:?}, expected {expected})",
-                        message.get("seq")
-                    ),
-                );
-                return Ok(());
-            }
-            inner.state.lock().expect("console client").expect_seq = expected;
+        let expected = {
+            let state = inner.state.lock().expect("console client");
+            state.expect_seq + 1
+        };
+        let valid = relay::frame_is_authed(&message, CONSOLE_PROTOCOL, &inner.state.lock().expect("console client").frame_key)
+            && message.get("seq").and_then(Json::as_i64) == Some(expected);
+        if !valid {
+            record_error(
+                inner,
+                format!(
+                    "console frame failed authentication (seq {:?}, expected {expected})",
+                    message.get("seq")
+                ),
+            );
+            return Ok(());
         }
+        inner.state.lock().expect("console client").expect_seq = expected;
         match kind {
             Some("vote") => {
                 let vote = inner.on_vote.lock().expect("console vote").clone();

@@ -39,7 +39,10 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .canonical import new_id
-from .relay import _frame, _read_frame, frame_signed, frame_is_authed, graceful_close
+from .relay import (
+    _frame, _read_frame, frame_signed, frame_is_authed, derive_session_key,
+    graceful_close,
+)
 
 CONSOLE_PROTOCOL = "voss.console.1"
 
@@ -140,6 +143,7 @@ class ConsoleServer:
         self._challenge = new_id("challenge-")
         self._seen_nonces: set = set()  # hello nonces, this process only
         self._auth_seq = 0  # per-connection post-hello frame seq (server side)
+        self._frame_key = b""
 
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -217,10 +221,17 @@ class ConsoleServer:
                                "reason": "denied_console_auth"})
             return
         _write_control(self.control_path, "console_accepted_hello", "host")
-        self._reply(conn, {"type": "hello_ok"})
+        self._frame_key = derive_session_key(
+            CONSOLE_PROTOCOL, self._transfer_key, self._challenge,
+            str(msg["nonce"]),
+        )
+        self._send_seq = 1
+        self._reply(conn, frame_signed(
+            CONSOLE_PROTOCOL, self._frame_key, self._send_seq,
+            {"type": "hello_ok"}))
         self._conn = conn
         self._auth_seq = 0
-        self._send_seq = 0  # server -> host vote/terminate frames
+        self._send_seq = 1  # hello_ok is the first server frame in this session
 
         if self._auto is not None:
             auto_thread = None
@@ -241,7 +252,7 @@ class ConsoleServer:
                     _write_control(self.control_path, "console_stream_closed",
                                    str(exc)[:120])
                 return
-            if not frame_is_authed(msg, CONSOLE_PROTOCOL, self._transfer_key):
+            if not frame_is_authed(msg, CONSOLE_PROTOCOL, self._frame_key):
                 _write_control(self.control_path, "console_anomaly",
                                "unauthenticated frame")
                 return
@@ -355,7 +366,7 @@ class ConsoleServer:
             self._send_seq += 1
             try:
                 conn.sendall(_frame(frame_signed(
-                    CONSOLE_PROTOCOL, self._transfer_key, self._send_seq, msg)))
+                    CONSOLE_PROTOCOL, self._frame_key, self._send_seq, msg)))
             except OSError:
                 pass
 
@@ -405,6 +416,7 @@ class ConsoleClient:
         self._last_error = ""
         self._send_seq = 0  # host -> console view/result frames
         self._expect_seq = 0  # console -> host vote/terminate frames
+        self._frame_key = b""
 
     def start(self) -> None:
         if self._thread is None:
@@ -454,7 +466,7 @@ class ConsoleClient:
             self._send_seq += 1
             try:
                 sock.sendall(_frame(frame_signed(
-                    CONSOLE_PROTOCOL, self._transfer_key, self._send_seq, msg)))
+                    CONSOLE_PROTOCOL, self._frame_key, self._send_seq, msg)))
             except Exception as exc:
                 self._record_error(f"console link lost: {exc}")
 
@@ -485,6 +497,10 @@ class ConsoleClient:
                 sock.close()
                 raise ConsoleAnomaly("challenge failed authentication")
             nonce = new_id("console-")
+            frame_key = derive_session_key(
+                CONSOLE_PROTOCOL, self._transfer_key,
+                challenge["challenge"], nonce,
+            )
             sock.sendall(_frame({"type": "hello", "version": CONSOLE_PROTOCOL,
                                  "challenge": challenge["challenge"],
                                  "nonce": nonce,
@@ -495,33 +511,35 @@ class ConsoleClient:
             if reply.get("type") != "hello_ok":
                 sock.close()
                 raise ConsoleAnomaly(f"hello refused: {reply!r}")
+            if (not frame_is_authed(reply, CONSOLE_PROTOCOL, frame_key) or
+                    reply.get("seq") != 1):
+                sock.close()
+                raise ConsoleAnomaly("hello_ok failed authentication")
             self._connected = True
             self._ever_connected = True
             self._last_error = ""
             self._sock = sock
+            self._frame_key = frame_key
             self._send_seq = 0  # per-connection frames are numbered from 1
-            self._expect_seq = 0
+            self._expect_seq = 1
         try:
             while not self._stop.is_set():
                 msg = _read_frame(sock)
                 kind = msg.get("type")
-                if kind in ("vote", "terminate"):
-                    with self._io_lock:
-                        expected = self._expect_seq + 1
-                        valid = (
-                            frame_is_authed(msg, CONSOLE_PROTOCOL,
-                                            self._transfer_key)
-                            and msg.get("seq") == expected
-                        )
-                    if not valid:
-                        with self._io_lock:
-                            self._expect_seq += 1
-                        self._record_error(
-                            f"console frame failed authentication "
-                            f"(seq {msg.get('seq')}, expected {expected})")
-                        return
-                    with self._io_lock:
-                        self._expect_seq = expected
+                with self._io_lock:
+                    expected = self._expect_seq + 1
+                    valid = (
+                        frame_is_authed(msg, CONSOLE_PROTOCOL,
+                                        self._frame_key)
+                        and msg.get("seq") == expected
+                    )
+                if not valid:
+                    self._record_error(
+                        f"console frame failed authentication "
+                        f"(seq {msg.get('seq')}, expected {expected})")
+                    return
+                with self._io_lock:
+                    self._expect_seq = expected
                     if kind == "vote":
                         self._dispatch(self._on_vote, msg.get("flow_id", ""),
                                        msg.get("decision", "DENY"),
