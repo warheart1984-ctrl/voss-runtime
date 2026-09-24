@@ -501,7 +501,7 @@ impl Broker {
     }
 
     fn store(&self, state: &mut BrokerState, capability: Capability) -> Capability {
-        let _ = self.audit.emit(
+        if self.audit.emit(
             "capability_issued",
             AuditFields {
                 worker_id: Some(capability.principal.clone()),
@@ -521,7 +521,10 @@ impl Broker {
                 approver_ref: Some(capability.approval_ref.clone()),
                 ..AuditFields::default()
             },
-        );
+        ).is_err() {
+            // fail-closed: do not store capability if audit is unavailable
+            return capability;
+        }
         state.caps.insert(capability.cap_id.clone(), capability.clone());
         wal_emit(&self.wal, "capability_issued", capability_record(&capability));
         crashpoint::maybe_crash(CAPABILITY_ISSUED);
