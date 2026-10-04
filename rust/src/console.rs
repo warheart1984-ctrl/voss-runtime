@@ -51,7 +51,10 @@ pub fn sign_console_challenge(transfer_key: &[u8], challenge: &str) -> String {
 
 fn console_challenge_frame(transfer_key: &[u8], challenge: &str) -> Json {
     Json::object([
-        ("mac", Json::string(sign_console_challenge(transfer_key, challenge))),
+        (
+            "mac",
+            Json::string(sign_console_challenge(transfer_key, challenge)),
+        ),
         ("challenge", Json::string(challenge)),
         ("type", Json::string("challenge")),
     ])
@@ -109,8 +112,11 @@ impl ConsoleServer {
         let store_dir = store_dir.as_ref();
         fs::create_dir_all(store_dir).map_err(|error| error.to_string())?;
         let store_dir = fs::canonicalize(store_dir).unwrap_or_else(|_| store_dir.to_path_buf());
-        let listener = TcpListener::bind(format!("127.0.0.1:{port}")).map_err(|error| error.to_string())?;
-        listener.set_nonblocking(true).map_err(|error| error.to_string())?;
+        let listener =
+            TcpListener::bind(format!("127.0.0.1:{port}")).map_err(|error| error.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
         let inner = Arc::new(ServerInner {
             control_path: store_dir.join("console-control.jsonl"),
             transcript_path: store_dir.join("console-transcript.jsonl"),
@@ -138,7 +144,11 @@ impl ConsoleServer {
     }
 
     pub fn port(&self) -> u16 {
-        self.inner.listener.local_addr().map(|addr| addr.port()).unwrap_or(0)
+        self.inner
+            .listener
+            .local_addr()
+            .map(|addr| addr.port())
+            .unwrap_or(0)
     }
 
     pub fn start(&self) {
@@ -147,7 +157,10 @@ impl ConsoleServer {
             return;
         }
         let inner = Arc::clone(&self.inner);
-        let auto_label = inner.auto.clone().unwrap_or_else(|| "interactive".to_string());
+        let auto_label = inner
+            .auto
+            .clone()
+            .unwrap_or_else(|| "interactive".to_string());
         write_control(
             &inner.control_path,
             "console_started",
@@ -181,7 +194,11 @@ fn dispatch(inner: Arc<ServerInner>, stream: TcpStream) {
         let mut stream = stream;
         prepare(&mut stream, Duration::from_secs(5));
         reply(&mut stream, &Json::object([("type", Json::string("busy"))]));
-        write_control(&inner.control_path, "console_busy", "another host is connected");
+        write_control(
+            &inner.control_path,
+            "console_busy",
+            "another host is connected",
+        );
         graceful_close(stream);
         return;
     }
@@ -195,7 +212,10 @@ fn dispatch(inner: Arc<ServerInner>, stream: TcpStream) {
 fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStream {
     prepare(&mut stream, Duration::from_secs(60));
     // Speak first with this process's challenge; a valid hello must MAC over it.
-    reply(&mut stream, &console_challenge_frame(&inner.transfer_key, &inner.challenge));
+    reply(
+        &mut stream,
+        &console_challenge_frame(&inner.transfer_key, &inner.challenge),
+    );
     let hello = match relay::read_frame(&mut stream) {
         Ok(message) => message,
         Err(_) => {
@@ -249,12 +269,24 @@ fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStrea
             Err(RelayFail::Timeout) => continue,
             Err(RelayFail::Closed(_)) => break,
             Err(error) => {
-                write_control(&inner.control_path, "console_stream_closed", &clip(&error.to_string()));
+                write_control(
+                    &inner.control_path,
+                    "console_stream_closed",
+                    &clip(&error.to_string()),
+                );
                 break;
             }
         };
-        if !relay::frame_is_authed(&message, CONSOLE_PROTOCOL, &inner.auth.lock().expect("console auth").frame_key) {
-            write_control(&inner.control_path, "console_anomaly", "unauthenticated frame");
+        if !relay::frame_is_authed(
+            &message,
+            CONSOLE_PROTOCOL,
+            &inner.auth.lock().expect("console auth").frame_key,
+        ) {
+            write_control(
+                &inner.control_path,
+                "console_anomaly",
+                "unauthenticated frame",
+            );
             break;
         }
         let expected = {
@@ -272,10 +304,20 @@ fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStrea
         }
         match message.get("type").and_then(Json::as_str) {
             Some("approval_view") => {
-                let flow_id = message.get("flow_id").and_then(Json::as_str).unwrap_or("").to_string();
+                let flow_id = message
+                    .get("flow_id")
+                    .and_then(Json::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 record_view(&inner, &flow_id, message.get("view"));
-                write_control(&inner.control_path, "console_view", &format!("flow={flow_id}"));
-                println!("[approval] flow={flow_id} -> type approve|deny|cancel or 'kill <reason>'");
+                write_control(
+                    &inner.control_path,
+                    "console_view",
+                    &format!("flow={flow_id}"),
+                );
+                println!(
+                    "[approval] flow={flow_id} -> type approve|deny|cancel or 'kill <reason>'"
+                );
                 let _ = io::stdout().flush();
                 if inner.auto.is_some() {
                     let flow_id = flow_id.clone();
@@ -291,11 +333,15 @@ fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStrea
                 let flow_id = text_field(&message, "flow_id");
                 let decision = text_field(&message, "decision");
                 let approver = text_field(&message, "approver_ref");
-                append_transcript(&inner.transcript_path, "result", &[
-                    ("approver_ref", Json::string(&approver)),
-                    ("decision", Json::string(&decision)),
-                    ("flow_id", Json::string(&flow_id)),
-                ]);
+                append_transcript(
+                    &inner.transcript_path,
+                    "result",
+                    &[
+                        ("approver_ref", Json::string(&approver)),
+                        ("decision", Json::string(&decision)),
+                        ("flow_id", Json::string(&flow_id)),
+                    ],
+                );
                 write_control(
                     &inner.control_path,
                     "console_result",
@@ -303,7 +349,11 @@ fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStrea
                 );
             }
             Some(kind) => {
-                write_control(&inner.control_path, "console_anomaly", &format!("unknown frame {kind:?}"));
+                write_control(
+                    &inner.control_path,
+                    "console_anomaly",
+                    &format!("unknown frame {kind:?}"),
+                );
                 break;
             }
             None => {
@@ -331,12 +381,19 @@ fn command_loop(inner: Arc<ServerInner>) {
         };
         if head.eq_ignore_ascii_case("kill") {
             let reason = parts.next().unwrap_or("operator").to_string();
-            send_conn(&inner, &Json::object([
-                ("reason", Json::string(&reason)),
-                ("type", Json::string("terminate")),
-            ]));
+            send_conn(
+                &inner,
+                &Json::object([
+                    ("reason", Json::string(&reason)),
+                    ("type", Json::string("terminate")),
+                ]),
+            );
             write_control(&inner.control_path, "console_terminate_directive", &reason);
-            append_transcript(&inner.transcript_path, "terminate", &[("reason", Json::string(&reason))]);
+            append_transcript(
+                &inner.transcript_path,
+                "terminate",
+                &[("reason", Json::string(&reason))],
+            );
             continue;
         }
         let Some(gesture) = parts.next() else {
@@ -354,18 +411,29 @@ fn command_loop(inner: Arc<ServerInner>) {
 }
 
 fn vote(inner: &ServerInner, flow_id: &str, decision: &str) {
-    send_conn(inner, &Json::object([
-        ("approver_ref", Json::string(&inner.approver_ref)),
-        ("decision", Json::string(decision)),
-        ("flow_id", Json::string(flow_id)),
-        ("type", Json::string("vote")),
-    ]));
-    write_control(&inner.control_path, "console_vote", &format!("flow={flow_id} decision={decision}"));
-    append_transcript(&inner.transcript_path, "vote", &[
-        ("approver_ref", Json::string(&inner.approver_ref)),
-        ("decision", Json::string(decision)),
-        ("flow_id", Json::string(flow_id)),
-    ]);
+    send_conn(
+        inner,
+        &Json::object([
+            ("approver_ref", Json::string(&inner.approver_ref)),
+            ("decision", Json::string(decision)),
+            ("flow_id", Json::string(flow_id)),
+            ("type", Json::string("vote")),
+        ]),
+    );
+    write_control(
+        &inner.control_path,
+        "console_vote",
+        &format!("flow={flow_id} decision={decision}"),
+    );
+    append_transcript(
+        &inner.transcript_path,
+        "vote",
+        &[
+            ("approver_ref", Json::string(&inner.approver_ref)),
+            ("decision", Json::string(decision)),
+            ("flow_id", Json::string(flow_id)),
+        ],
+    );
 }
 
 fn send_conn(inner: &ServerInner, message: &Json) {
@@ -390,17 +458,25 @@ fn send_conn(inner: &ServerInner, message: &Json) {
 }
 
 fn record_view(inner: &ServerInner, flow_id: &str, view: Option<&Json>) {
-    let field = |key: &str| view.and_then(|view| view.get(key)).cloned().unwrap_or(Json::Null);
-    append_transcript(&inner.transcript_path, "view", &[
-        ("action", field("action")),
-        ("consequences", field("consequences")),
-        ("expires_in_seconds", field("expires_in_seconds")),
-        ("flow_id", Json::string(flow_id)),
-        ("payload_digest", field("payload_digest")),
-        ("resource", field("resource")),
-        ("reversible", field("reversible")),
-        ("risk_class", field("risk_class")),
-    ]);
+    let field = |key: &str| {
+        view.and_then(|view| view.get(key))
+            .cloned()
+            .unwrap_or(Json::Null)
+    };
+    append_transcript(
+        &inner.transcript_path,
+        "view",
+        &[
+            ("action", field("action")),
+            ("consequences", field("consequences")),
+            ("expires_in_seconds", field("expires_in_seconds")),
+            ("flow_id", Json::string(flow_id)),
+            ("payload_digest", field("payload_digest")),
+            ("resource", field("resource")),
+            ("reversible", field("reversible")),
+            ("risk_class", field("risk_class")),
+        ],
+    );
 }
 
 pub struct ConsoleHealth {
@@ -443,7 +519,12 @@ impl ConsoleClient {
         Self::with_timeout(host, port, transfer_key, Duration::from_secs(2))
     }
 
-    pub fn with_timeout(host: impl Into<String>, port: u16, transfer_key: Vec<u8>, timeout: Duration) -> Self {
+    pub fn with_timeout(
+        host: impl Into<String>,
+        port: u16,
+        transfer_key: Vec<u8>,
+        timeout: Duration,
+    ) -> Self {
         Self {
             inner: Arc::new(ClientInner {
                 host: host.into(),
@@ -514,7 +595,14 @@ impl ConsoleClient {
         let health = self.health();
         Json::object([
             ("connected", Json::Bool(health.connected)),
-            ("error", if health.error.is_empty() { Json::Null } else { Json::string(health.error) }),
+            (
+                "error",
+                if health.error.is_empty() {
+                    Json::Null
+                } else {
+                    Json::string(health.error)
+                },
+            ),
             ("failed", Json::Bool(health.failed)),
             ("ok", Json::Bool(health.ok)),
         ])
@@ -593,14 +681,24 @@ fn session(inner: &ClientInner) -> Result<(), String> {
 fn connect_hello(inner: &ClientInner) -> Result<TcpStream, String> {
     let address = format!("{}:{}", inner.host, inner.port);
     let mut stream = TcpStream::connect_timeout(
-        &address.parse().map_err(|error: std::net::AddrParseError| error.to_string())?,
+        &address
+            .parse()
+            .map_err(|error: std::net::AddrParseError| error.to_string())?,
         inner.timeout,
     )
     .map_err(|error| error.to_string())?;
-    stream.set_nodelay(true).map_err(|error| error.to_string())?;
-    stream.set_nonblocking(false).map_err(|error| error.to_string())?;
-    stream.set_read_timeout(Some(inner.timeout)).map_err(|error| error.to_string())?;
-    stream.set_write_timeout(Some(inner.timeout)).map_err(|error| error.to_string())?;
+    stream
+        .set_nodelay(true)
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_read_timeout(Some(inner.timeout))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(inner.timeout))
+        .map_err(|error| error.to_string())?;
     let challenge = relay::read_frame(&mut stream).map_err(|error| error.to_string())?;
     if challenge.get("type").and_then(Json::as_str) != Some("challenge") {
         return Err(format!("no challenge: {challenge:?}"));
@@ -608,7 +706,12 @@ fn connect_hello(inner: &ClientInner) -> Result<TcpStream, String> {
     let Some(challenge_value) = challenge.get("challenge").and_then(Json::as_str) else {
         return Err(format!("no challenge: {challenge:?}"));
     };
-    if challenge.get("mac").and_then(Json::as_str) != Some(&sign_console_challenge(&inner.transfer_key, challenge_value)) {
+    if challenge.get("mac").and_then(Json::as_str)
+        != Some(&sign_console_challenge(
+            &inner.transfer_key,
+            challenge_value,
+        ))
+    {
         return Err("challenge failed authentication".to_string());
     }
     let nonce = new_id("console-");
@@ -618,13 +721,23 @@ fn connect_hello(inner: &ClientInner) -> Result<TcpStream, String> {
         challenge_value,
         &nonce,
     );
-    write_frame(&mut stream, &Json::object([
-        ("challenge", Json::string(challenge_value)),
-        ("mac", Json::string(sign_console_hello(&inner.transfer_key, &nonce, challenge_value))),
-        ("nonce", Json::string(nonce)),
-        ("type", Json::string("hello")),
-        ("version", Json::string(CONSOLE_PROTOCOL)),
-    ]))?;
+    write_frame(
+        &mut stream,
+        &Json::object([
+            ("challenge", Json::string(challenge_value)),
+            (
+                "mac",
+                Json::string(sign_console_hello(
+                    &inner.transfer_key,
+                    &nonce,
+                    challenge_value,
+                )),
+            ),
+            ("nonce", Json::string(nonce)),
+            ("type", Json::string("hello")),
+            ("version", Json::string(CONSOLE_PROTOCOL)),
+        ]),
+    )?;
     let reply = relay::read_frame(&mut stream).map_err(|error| error.to_string())?;
     if reply.get("type").and_then(Json::as_str) != Some("hello_ok")
         || !relay::frame_is_authed(&reply, CONSOLE_PROTOCOL, &session_key)
@@ -649,8 +762,11 @@ fn read_votes(inner: &ClientInner, reader: &mut TcpStream) -> Result<(), String>
             let state = inner.state.lock().expect("console client");
             state.expect_seq + 1
         };
-        let valid = relay::frame_is_authed(&message, CONSOLE_PROTOCOL, &inner.state.lock().expect("console client").frame_key)
-            && message.get("seq").and_then(Json::as_i64) == Some(expected);
+        let valid = relay::frame_is_authed(
+            &message,
+            CONSOLE_PROTOCOL,
+            &inner.state.lock().expect("console client").frame_key,
+        ) && message.get("seq").and_then(Json::as_i64) == Some(expected);
         if !valid {
             record_error(
                 inner,
@@ -668,15 +784,26 @@ fn read_votes(inner: &ClientInner, reader: &mut TcpStream) -> Result<(), String>
                 if let Some(vote) = vote {
                     vote(
                         text_field(&message, "flow_id"),
-                        message.get("decision").and_then(Json::as_str).unwrap_or("DENY").to_string(),
+                        message
+                            .get("decision")
+                            .and_then(Json::as_str)
+                            .unwrap_or("DENY")
+                            .to_string(),
                         text_field(&message, "approver_ref"),
                     );
                 }
             }
             Some("terminate") => {
-                let terminate = inner.on_terminate.lock().expect("console terminate").clone();
+                let terminate = inner
+                    .on_terminate
+                    .lock()
+                    .expect("console terminate")
+                    .clone();
                 if let Some(terminate) = terminate {
-                    let reason = message.get("reason").and_then(Json::as_str).unwrap_or("operator");
+                    let reason = message
+                        .get("reason")
+                        .and_then(Json::as_str)
+                        .unwrap_or("operator");
                     terminate(reason.to_string());
                 }
             }
@@ -708,7 +835,9 @@ fn record_error(inner: &ClientInner, error: String) {
 
 fn write_frame(stream: &mut TcpStream, message: &Json) -> Result<(), String> {
     let bytes = relay::frame(message).map_err(|error| error.to_string())?;
-    stream.write_all(&bytes).map_err(|error| error.to_string())?;
+    stream
+        .write_all(&bytes)
+        .map_err(|error| error.to_string())?;
     stream.flush().map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -777,8 +906,14 @@ fn graceful_close(mut stream: TcpStream) {
 }
 
 fn append_transcript(path: &Path, kind: &str, fields: &[(&str, Json)]) {
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs_f64()).unwrap_or(0.0);
-    let mut pairs = vec![("kind".to_string(), Json::string(kind)), ("ts".to_string(), json_number(seconds))];
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0);
+    let mut pairs = vec![
+        ("kind".to_string(), Json::string(kind)),
+        ("ts".to_string(), json_number(seconds)),
+    ];
     for (key, value) in fields {
         pairs.push(((*key).to_string(), value.clone()));
     }
@@ -793,7 +928,10 @@ fn append_transcript(path: &Path, kind: &str, fields: &[(&str, Json)]) {
 }
 
 fn write_control(path: &Path, event: &str, detail: &str) {
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs_f64()).unwrap_or(0.0);
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0);
     let line = Json::object([
         ("detail", Json::string(detail)),
         ("event", Json::string(event)),
@@ -809,11 +947,17 @@ fn write_control(path: &Path, event: &str, detail: &str) {
 }
 
 fn text_field(message: &Json, key: &str) -> String {
-    message.get(key).and_then(Json::as_str).unwrap_or("").to_string()
+    message
+        .get(key)
+        .and_then(Json::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 fn preview(message: &Json) -> String {
-    canonical_bytes(message).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default()
+    canonical_bytes(message)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default()
 }
 
 fn clip(value: &str) -> String {

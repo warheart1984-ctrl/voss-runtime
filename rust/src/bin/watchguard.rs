@@ -15,7 +15,9 @@ fn main() {
     let (store, port_file, transfer_key) = match (store, port_file, transfer_key) {
         (Some(store), Some(port_file), Some(transfer_key)) => (store, port_file, transfer_key),
         _ => {
-            eprintln!("usage: watchguard --store DIR --port-file PATH --transfer-key HEX [--timeout SECONDS] [--port PORT]");
+            eprintln!(
+                "usage: watchguard --store DIR --port-file PATH --transfer-key HEX [--timeout SECONDS] [--port PORT]"
+            );
             std::process::exit(2);
         }
     };
@@ -23,7 +25,9 @@ fn main() {
         .and_then(|value| value.parse::<f64>().ok())
         .map(Duration::from_secs_f64)
         .unwrap_or_else(|| Duration::from_secs(3));
-    let port = argument("--port").and_then(|value| value.parse::<u16>().ok()).unwrap_or(0);
+    let port = argument("--port")
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(0);
     let transfer_key = match hex::decode(transfer_key.trim()) {
         Ok(key) => key,
         Err(error) => {
@@ -51,5 +55,7 @@ fn main() {
 
 fn argument(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    args.iter().position(|item| item == name).and_then(|index| args.get(index + 1).cloned())
+    args.iter()
+        .position(|item| item == name)
+        .and_then(|index| args.get(index + 1).cloned())
 }

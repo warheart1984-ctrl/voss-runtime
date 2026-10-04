@@ -83,7 +83,14 @@ impl ChannelSession {
             return Err(ChannelError::new("denied_channel_wrong_direction"));
         }
         self.send_seq += 1;
-        wire_line(&self.key, &self.sid, self.send_dir, self.send_seq, msg_type, msg)
+        wire_line(
+            &self.key,
+            &self.sid,
+            self.send_dir,
+            self.send_seq,
+            msg_type,
+            msg,
+        )
     }
 
     pub fn receive(&mut self, text: &str) -> Result<(String, Json), ChannelError> {
@@ -106,7 +113,10 @@ impl ChannelSession {
         if !self.allowed_peer.contains(&msg_type) {
             return Err(ChannelError::new("denied_channel_wrong_direction"));
         }
-        let Some(msg) = body.get("msg").filter(|value| matches!(value, Json::Object(_))) else {
+        let Some(msg) = body
+            .get("msg")
+            .filter(|value| matches!(value, Json::Object(_)))
+        else {
             return Err(ChannelError::new("denied_channel_auth"));
         };
         let expected = mac_hex(&self.key, &body)?;
@@ -173,7 +183,8 @@ pub fn read_bootstrap(text: &str) -> Result<(Vec<u8>, String), ChannelError> {
 }
 
 pub fn consume_bootstrap(path: &Path) -> Result<(Vec<u8>, String), ChannelError> {
-    let text = fs::read_to_string(path).map_err(|_| ChannelError::new("denied_channel_bootstrap"))?;
+    let text =
+        fs::read_to_string(path).map_err(|_| ChannelError::new("denied_channel_bootstrap"))?;
     let _ = fs::remove_file(path);
     read_bootstrap(&text)
 }
@@ -188,7 +199,10 @@ fn issued_at() -> Json {
 
 fn parse_wire(text: &str) -> Result<(Json, String), ChannelError> {
     let line = loads_strict(text).map_err(|_| ChannelError::new("denied_channel_auth"))?;
-    let Some(body) = line.get("body").filter(|value| matches!(value, Json::Object(_))) else {
+    let Some(body) = line
+        .get("body")
+        .filter(|value| matches!(value, Json::Object(_)))
+    else {
         return Err(ChannelError::new("denied_channel_auth"));
     };
     let Some(wire_mac) = line.get("mac").and_then(Json::as_str) else {
@@ -199,7 +213,8 @@ fn parse_wire(text: &str) -> Result<(Json, String), ChannelError> {
 
 fn mac_hex(key: &[u8], body: &Json) -> Result<String, ChannelError> {
     let bytes = canonical_bytes(body).map_err(|_| ChannelError::new("denied_channel_auth"))?;
-    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| ChannelError::new("denied_channel_auth"))?;
+    let mut mac =
+        HmacSha256::new_from_slice(key).map_err(|_| ChannelError::new("denied_channel_auth"))?;
     mac.update(&bytes);
     Ok(hex::encode(mac.finalize().into_bytes()))
 }

@@ -43,7 +43,11 @@ fn envelope(
 }
 
 fn text(value: &Json, key: &str) -> String {
-    value.get(key).and_then(Json::as_str).unwrap_or("").to_string()
+    value
+        .get(key)
+        .and_then(Json::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 fn flag(value: &Json, key: &str) -> bool {
@@ -55,7 +59,13 @@ fn chain_roundtrip_and_verification() {
     let root = std::env::temp_dir().join(format!("voss-wal-{}", new_id("")));
     fs::create_dir_all(&root).unwrap();
     let keys = KeyRing::generate();
-    let wal = AuditLog::open_chain(root.join("wal.jsonl"), keys, WAL_SCHEMA, &wal_genesis().unwrap()).unwrap();
+    let wal = AuditLog::open_chain(
+        root.join("wal.jsonl"),
+        keys,
+        WAL_SCHEMA,
+        &wal_genesis().unwrap(),
+    )
+    .unwrap();
     wal.emit(
         "flow_request",
         voss::audit::AuditFields {
@@ -87,7 +97,11 @@ fn chain_roundtrip_and_verification() {
         .records()
         .unwrap()
         .iter()
-        .filter_map(|line| line.get("record").and_then(|record| record.get("flow_id")).and_then(Json::as_str))
+        .filter_map(|line| {
+            line.get("record")
+                .and_then(|record| record.get("flow_id"))
+                .and_then(Json::as_str)
+        })
         .map(str::to_string)
         .collect();
     assert_eq!(ids, ["approval-1", "approval-2"]);
@@ -102,7 +116,8 @@ fn tamper_detected() {
     let path = root.join("wal.jsonl");
     let keys = KeyRing::generate();
     {
-        let wal = AuditLog::open_chain(&path, keys.clone(), WAL_SCHEMA, &wal_genesis().unwrap()).unwrap();
+        let wal =
+            AuditLog::open_chain(&path, keys.clone(), WAL_SCHEMA, &wal_genesis().unwrap()).unwrap();
         wal.emit(
             "flow_request",
             voss::audit::AuditFields {
@@ -167,7 +182,10 @@ fn pending_approval_survives_restart() {
     assert!(flag(&health, "recovery_ok"));
     assert_eq!(restarted.worker_principal, principal);
     assert_eq!(restarted.worker_session, session);
-    assert_eq!(restarted.approval_state(&flow_id).as_deref(), Some("PENDING_APPROVAL"));
+    assert_eq!(
+        restarted.approval_state(&flow_id).as_deref(),
+        Some("PENDING_APPROVAL")
+    );
     let decided = restarted.resolve_approval(&flow_id, "APPROVE", "test-human");
     assert_eq!(text(&decided, "decision"), "ALLOW", "{decided:?}");
     let draft = fs::read_to_string(restarted.workspace_root.join("draft.txt")).unwrap();
@@ -195,7 +213,11 @@ fn consumed_request_not_replayable_after_restart() {
         Json::object([("send_once", Json::Bool(true))]),
     );
     let pending = runtime.handle_envelope(&proposal);
-    let sent = runtime.resolve_approval(&text(&pending, "approval_request_id"), "APPROVE", "test-human");
+    let sent = runtime.resolve_approval(
+        &text(&pending, "approval_request_id"),
+        "APPROVE",
+        "test-human",
+    );
     assert_eq!(text(&sent, "decision"), "ALLOW");
     let first = fs::read_dir(&runtime.outbox_dir).unwrap().count();
     assert_eq!(first, 1);
@@ -205,7 +227,11 @@ fn consumed_request_not_replayable_after_restart() {
     assert!(flag(&restarted.health_report(), "recovery_ok"));
     let again = restarted.handle_envelope(&proposal);
     assert_eq!(text(&again, "decision"), "REQUIRE_APPROVAL");
-    let replay = restarted.resolve_approval(&text(&again, "approval_request_id"), "APPROVE", "test-human");
+    let replay = restarted.resolve_approval(
+        &text(&again, "approval_request_id"),
+        "APPROVE",
+        "test-human",
+    );
     assert_eq!(text(&replay, "reason_code"), "denied_replay");
     assert_eq!(fs::read_dir(&restarted.outbox_dir).unwrap().count(), first);
     restarted.close();
@@ -231,7 +257,11 @@ fn tampered_wal_fails_closed() {
 
     let path = root.join("wal.jsonl");
     let raw = fs::read_to_string(&path).unwrap();
-    let mut lines: Vec<_> = raw.lines().filter(|line| !line.is_empty()).map(str::to_string).collect();
+    let mut lines: Vec<_> = raw
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
     let mut record = loads_strict(lines.last().unwrap()).unwrap();
     if let Json::Object(object) = &mut record
         && let Some(Json::Object(payload)) = object.get_mut("record")

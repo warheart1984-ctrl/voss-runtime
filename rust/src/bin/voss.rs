@@ -13,22 +13,49 @@ use std::process::Child;
 use voss::canonical::{Json, canonical_bytes, new_id};
 use voss::keys::KeyRing;
 use voss::policy::package_policy;
-use voss::runtime::{default_dev_policy, VossRuntime};
+use voss::runtime::{VossRuntime, default_dev_policy};
 
 const DEMO: &[(&str, &str, &str)] = &[
-    ("read-forwarded-file", "propose:read", "A0 observe, policy grant, logged"),
-    ("write-draft", "propose:write", "A1 workspace edit, human approval required"),
-    ("send-project-update", "propose:email", "A2 external effect, one-time human approval"),
-    ("uncertain-send", "propose:uncertain", "A2 ambiguous outcome -> UNKNOWN, no retry"),
-    ("malicious-delete", "propose:delete", "unknown tools -> default deny"),
+    (
+        "read-forwarded-file",
+        "propose:read",
+        "A0 observe, policy grant, logged",
+    ),
+    (
+        "write-draft",
+        "propose:write",
+        "A1 workspace edit, human approval required",
+    ),
+    (
+        "send-project-update",
+        "propose:email",
+        "A2 external effect, one-time human approval",
+    ),
+    (
+        "uncertain-send",
+        "propose:uncertain",
+        "A2 ambiguous outcome -> UNKNOWN, no retry",
+    ),
+    (
+        "malicious-delete",
+        "propose:delete",
+        "unknown tools -> default deny",
+    ),
     ("path-escape", "propose:escape", "traversal -> default deny"),
-    ("identity-forge", "propose:admin", "principal forgery -> identity deny"),
+    (
+        "identity-forge",
+        "propose:admin",
+        "principal forgery -> identity deny",
+    ),
 ];
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let auto = args.iter().any(|arg| arg == "--auto");
-    let root = args.iter().position(|arg| arg == "--root").and_then(|index| args.get(index + 1));
+    let root = args
+        .iter()
+        .position(|arg| arg == "--root")
+        .and_then(|index| args.get(index + 1));
     let base = match root {
         Some(path) => PathBuf::from(path),
         None => env::temp_dir().join(format!("voss-demo-{}", new_id(""))),
@@ -47,14 +74,16 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let package = match default_dev_policy(&workspace).and_then(|body| package_policy(&body, &keyring)) {
-        Ok(package) => package,
-        Err(error) => {
-            eprintln!("cannot build policy: {}", error.message());
-            std::process::exit(1);
-        }
-    };
-    let runtime = match VossRuntime::open(&workspace, &outbox, &audit_path, keyring, Some(package)) {
+    let package =
+        match default_dev_policy(&workspace).and_then(|body| package_policy(&body, &keyring)) {
+            Ok(package) => package,
+            Err(error) => {
+                eprintln!("cannot build policy: {}", error.message());
+                std::process::exit(1);
+            }
+        };
+    let runtime = match VossRuntime::open(&workspace, &outbox, &audit_path, keyring, Some(package))
+    {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("cannot open runtime: {}", error.message());
@@ -67,7 +96,10 @@ fn main() {
     );
     println!("Runtime root : {}", base.display());
     println!("Worker       : {}", runtime.worker_principal);
-    println!("Policy       : v{} (audit_required, human-gated actions present)", runtime.policy_version);
+    println!(
+        "Policy       : v{} (audit_required, human-gated actions present)",
+        runtime.policy_version
+    );
     println!("Tools        : {}", runtime.tool_names().join(", "));
 
     let mut worker = match runtime.spawn_worker() {
@@ -78,7 +110,10 @@ fn main() {
             std::process::exit(1);
         }
     };
-    println!("Worker proc  : pid {} (spawned with clean env)", worker.id());
+    println!(
+        "Worker proc  : pid {} (spawned with clean env)",
+        worker.id()
+    );
 
     let mut killed = false;
     for (name, prompt, note) in DEMO {
@@ -154,7 +189,10 @@ fn main() {
     println!("{}", json_line(&runtime.drift_report()));
     println!("=== OUTBOX (simulated external effects) ===");
     if let Ok(entries) = fs::read_dir(&outbox) {
-        let mut names: Vec<_> = entries.filter_map(|entry| entry.ok()).map(|entry| entry.file_name()).collect();
+        let mut names: Vec<_> = entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name())
+            .collect();
         names.sort();
         for name in names {
             println!("  {}", name.to_string_lossy());

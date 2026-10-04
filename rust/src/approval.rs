@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::audit::{AuditFields, AuditLog};
-use crate::crashpoint::{self, FLOW_REQUEST, FLOW_REQUEST_PREWAL, FLOW_RESOLUTION};
 use crate::canonical::{Json, json_number, new_id};
+use crate::crashpoint::{self, FLOW_REQUEST, FLOW_REQUEST_PREWAL, FLOW_RESOLUTION};
 use crate::protocol::{CanonicalRequest, action_class};
 
 pub const STATE_PENDING_APPROVAL: &str = "PENDING_APPROVAL";
@@ -138,7 +138,11 @@ impl ApprovalController {
         controller
     }
 
-    pub fn request(&self, request: &CanonicalRequest, expiry_seconds: f64) -> Result<ApprovalFlow, ApprovalError> {
+    pub fn request(
+        &self,
+        request: &CanonicalRequest,
+        expiry_seconds: f64,
+    ) -> Result<ApprovalFlow, ApprovalError> {
         if expiry_seconds <= 0.0 {
             return Err(ApprovalError::new("approval expiry must be positive"));
         }
@@ -172,24 +176,27 @@ impl ApprovalController {
             .expect("approval lock")
             .insert(flow.flow_id.clone(), flow.clone());
         crashpoint::maybe_crash(FLOW_REQUEST_PREWAL);
-        self.note("flow_request", [
-            ("flow_id", Json::string(&flow.flow_id)),
-            ("version", Json::string(&flow.request.version)),
-            ("request_id", Json::string(&flow.request.request_id)),
-            ("session_id", Json::string(&flow.request.session_id)),
-            ("principal", Json::string(&flow.request.principal)),
-            ("action", Json::string(&flow.request.action)),
-            ("resource", flow.request.resource.clone()),
-            ("payload", flow.request.payload.clone()),
-            ("constraints", flow.request.constraints.clone()),
-            ("payload_digest", Json::string(&flow.request.payload_digest)),
-            ("policy_version", Json::string(&flow.policy_version)),
-            ("nonce", Json::string(&flow.nonce)),
-            ("expires_at", json_number(flow.expires_at)),
-            ("binding_digest", Json::string(&flow.binding_digest)),
-            ("request_digest", Json::string(&flow.request_digest)),
-            ("created_at", json_number(flow.created_at)),
-        ]);
+        self.note(
+            "flow_request",
+            [
+                ("flow_id", Json::string(&flow.flow_id)),
+                ("version", Json::string(&flow.request.version)),
+                ("request_id", Json::string(&flow.request.request_id)),
+                ("session_id", Json::string(&flow.request.session_id)),
+                ("principal", Json::string(&flow.request.principal)),
+                ("action", Json::string(&flow.request.action)),
+                ("resource", flow.request.resource.clone()),
+                ("payload", flow.request.payload.clone()),
+                ("constraints", flow.request.constraints.clone()),
+                ("payload_digest", Json::string(&flow.request.payload_digest)),
+                ("policy_version", Json::string(&flow.policy_version)),
+                ("nonce", Json::string(&flow.nonce)),
+                ("expires_at", json_number(flow.expires_at)),
+                ("binding_digest", Json::string(&flow.binding_digest)),
+                ("request_digest", Json::string(&flow.request_digest)),
+                ("created_at", json_number(flow.created_at)),
+            ],
+        );
         crashpoint::maybe_crash(FLOW_REQUEST);
         Ok(flow)
     }
@@ -299,11 +306,14 @@ impl ApprovalController {
             transition(flow, next)?;
             let logged = flow.clone();
             drop(flows);
-            self.note("flow_outcome", [
-                ("flow_id", Json::string(&logged.flow_id)),
-                ("outcome", Json::string(outcome)),
-                ("state", Json::string(&logged.state)),
-            ]);
+            self.note(
+                "flow_outcome",
+                [
+                    ("flow_id", Json::string(&logged.flow_id)),
+                    ("outcome", Json::string(outcome)),
+                    ("state", Json::string(&logged.state)),
+                ],
+            );
             return Ok(());
         }
         Ok(())
@@ -316,14 +326,23 @@ impl ApprovalController {
             .insert(flow.flow_id.clone(), flow);
     }
 
-    fn note_resolution(&self, flow: &ApprovalFlow, decision: &str, approver_ref: &str, authorized: bool) {
-        self.note("flow_resolution", [
-            ("flow_id", Json::string(&flow.flow_id)),
-            ("decision", Json::string(decision)),
-            ("approver_ref", Json::string(approver_ref)),
-            ("state", Json::string(&flow.state)),
-            ("authorized", Json::Bool(authorized)),
-        ]);
+    fn note_resolution(
+        &self,
+        flow: &ApprovalFlow,
+        decision: &str,
+        approver_ref: &str,
+        authorized: bool,
+    ) {
+        self.note(
+            "flow_resolution",
+            [
+                ("flow_id", Json::string(&flow.flow_id)),
+                ("decision", Json::string(decision)),
+                ("approver_ref", Json::string(approver_ref)),
+                ("state", Json::string(&flow.state)),
+                ("authorized", Json::Bool(authorized)),
+            ],
+        );
     }
 
     fn note(&self, event: &str, pairs: impl IntoIterator<Item = (&'static str, Json)>) {

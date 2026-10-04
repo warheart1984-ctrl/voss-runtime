@@ -26,7 +26,9 @@ fn main() {
         .and_then(|value| value.parse::<f64>().ok())
         .map(Duration::from_secs_f64)
         .unwrap_or_else(|| Duration::from_millis(200));
-    let port = argument("--port").and_then(|value| value.parse::<u16>().ok()).unwrap_or(0);
+    let port = argument("--port")
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(0);
     let transfer_key = match hex::decode(transfer_key.trim()) {
         Ok(key) => key,
         Err(error) => {

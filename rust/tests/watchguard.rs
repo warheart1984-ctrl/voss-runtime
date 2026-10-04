@@ -12,7 +12,7 @@ use voss::canonical::{Json, canonical_bytes, loads_strict, new_id};
 use voss::keys::KeyRing;
 use voss::relay;
 use voss::runtime::VossRuntime;
-use voss::watchguard::{self, WatchGuardLink, WatchGuardServer, GUARD_PROTOCOL};
+use voss::watchguard::{self, GUARD_PROTOCOL, WatchGuardLink, WatchGuardServer};
 
 struct GuardProc {
     child: Child,
@@ -43,20 +43,23 @@ fn start_guard(root: &Path, timeout: f64) -> GuardProc {
     fs::create_dir_all(root).unwrap();
     let store = root.join("guard_store");
     fs::create_dir_all(&store).unwrap();
-    let key: Vec<u8> = (0u8..32).map(|index| index.wrapping_mul(7).wrapping_add(3)).collect();
+    let key: Vec<u8> = (0u8..32)
+        .map(|index| index.wrapping_mul(7).wrapping_add(3))
+        .collect();
     let port_file = root.join("guard_port.txt");
-    let mut child = Command::new(std::env::var("CARGO_BIN_EXE_watchguard").expect("watchguard binary"))
-        .arg("--store")
-        .arg(&store)
-        .arg("--port-file")
-        .arg(&port_file)
-        .arg("--transfer-key")
-        .arg(hex::encode(&key))
-        .arg("--timeout")
-        .arg(timeout.to_string())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn watchguard");
+    let mut child =
+        Command::new(std::env::var("CARGO_BIN_EXE_watchguard").expect("watchguard binary"))
+            .arg("--store")
+            .arg(&store)
+            .arg("--port-file")
+            .arg(&port_file)
+            .arg("--transfer-key")
+            .arg(hex::encode(&key))
+            .arg("--timeout")
+            .arg(timeout.to_string())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn watchguard");
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut port = None;
     while Instant::now() < deadline {
@@ -80,7 +83,12 @@ fn start_guard(root: &Path, timeout: f64) -> GuardProc {
         let _ = child.kill();
         panic!("guard port never published");
     };
-    GuardProc { child, store, port, key }
+    GuardProc {
+        child,
+        store,
+        port,
+        key,
+    }
 }
 
 fn spawn_sleeper() -> Sleeper {
@@ -118,7 +126,9 @@ fn wait_registered(client: &WatchGuardLink) {
 }
 
 fn wait_killed(child: &mut Child) -> bool {
-    wait_until(Duration::from_secs(6), || child.try_wait().ok().flatten().is_some())
+    wait_until(Duration::from_secs(6), || {
+        child.try_wait().ok().flatten().is_some()
+    })
 }
 
 fn control_records(store: &Path) -> Vec<Json> {
@@ -132,14 +142,24 @@ fn control_records(store: &Path) -> Vec<Json> {
 fn control_events(store: &Path) -> Vec<String> {
     control_records(store)
         .iter()
-        .filter_map(|record| record.get("event").and_then(Json::as_str).map(str::to_string))
+        .filter_map(|record| {
+            record
+                .get("event")
+                .and_then(Json::as_str)
+                .map(str::to_string)
+        })
         .collect()
 }
 
 fn control_details(store: &Path, prefix: &str) -> String {
     control_records(store)
         .iter()
-        .filter(|record| record.get("event").and_then(Json::as_str).is_some_and(|event| event.starts_with(prefix)))
+        .filter(|record| {
+            record
+                .get("event")
+                .and_then(Json::as_str)
+                .is_some_and(|event| event.starts_with(prefix))
+        })
         .filter_map(|record| record.get("detail").and_then(Json::as_str))
         .collect::<Vec<_>>()
         .join(" ")
@@ -147,12 +167,24 @@ fn control_details(store: &Path, prefix: &str) -> String {
 
 fn raw_hello(port: u16, key: &[u8]) -> (TcpStream, Json, Vec<u8>) {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     stream.set_nodelay(true).unwrap();
     let challenge = relay::read_frame(&mut stream).expect("guest challenge");
-    assert_eq!(challenge.get("type").and_then(Json::as_str), Some("challenge"), "{challenge:?}");
-    let challenge_value = challenge.get("challenge").and_then(Json::as_str).expect("challenge value").to_string();
+    assert_eq!(
+        challenge.get("type").and_then(Json::as_str),
+        Some("challenge"),
+        "{challenge:?}"
+    );
+    let challenge_value = challenge
+        .get("challenge")
+        .and_then(Json::as_str)
+        .expect("challenge value")
+        .to_string();
     assert_eq!(
         challenge.get("mac").and_then(Json::as_str),
         Some(watchguard::sign_guard_challenge(key, &challenge_value).as_str()),
@@ -161,7 +193,10 @@ fn raw_hello(port: u16, key: &[u8]) -> (TcpStream, Json, Vec<u8>) {
     let nonce = new_id("guard-");
     let hello = Json::object([
         ("challenge", Json::string(challenge_value.clone())),
-        ("mac", Json::string(watchguard::sign_guard_hello(key, &nonce, &challenge_value))),
+        (
+            "mac",
+            Json::string(watchguard::sign_guard_hello(key, &nonce, &challenge_value)),
+        ),
         ("nonce", Json::string(&nonce)),
         ("type", Json::string("hello")),
         ("version", Json::string(GUARD_PROTOCOL)),
@@ -171,7 +206,10 @@ fn raw_hello(port: u16, key: &[u8]) -> (TcpStream, Json, Vec<u8>) {
     stream.flush().unwrap();
     let reply = relay::read_frame(&mut stream).expect("hello reply");
     let frame_key = relay::derive_session_key(GUARD_PROTOCOL, key, &challenge_value, &nonce);
-    assert!(relay::frame_is_authed(&reply, GUARD_PROTOCOL, &frame_key), "{reply:?}");
+    assert!(
+        relay::frame_is_authed(&reply, GUARD_PROTOCOL, &frame_key),
+        "{reply:?}"
+    );
     assert_eq!(reply.get("seq").and_then(Json::as_i64), Some(1));
     (stream, reply, frame_key)
 }
@@ -185,7 +223,14 @@ fn send_frame(stream: &mut TcpStream, message: &Json) {
 fn open_runtime(root: &Path) -> VossRuntime {
     fs::create_dir_all(root.join("workspace")).unwrap();
     let keys = KeyRing::load_or_create(root).unwrap();
-    VossRuntime::open(root.join("workspace"), root.join("outbox"), root.join("audit.jsonl"), keys, None).unwrap()
+    VossRuntime::open(
+        root.join("workspace"),
+        root.join("outbox"),
+        root.join("audit.jsonl"),
+        keys,
+        None,
+    )
+    .unwrap()
 }
 
 fn envelope(runtime: &VossRuntime, path: &str) -> String {
@@ -216,9 +261,18 @@ fn heartbeats_keep_worker_alive_past_timeout() {
     client.register_worker(worker.child.id());
     wait_registered(&client);
     thread::sleep(Duration::from_millis(2500));
-    assert!(worker.child.try_wait().ok().flatten().is_none(), "worker must survive heartbeats");
+    assert!(
+        worker.child.try_wait().ok().flatten().is_none(),
+        "worker must survive heartbeats"
+    );
     assert!(client.health().ok, "{:?}", client.health_json());
-    assert!(!control_events(&guard.store).iter().any(|event| event == "guard_kill"), "{:?}", control_events(&guard.store));
+    assert!(
+        !control_events(&guard.store)
+            .iter()
+            .any(|event| event == "guard_kill"),
+        "{:?}",
+        control_events(&guard.store)
+    );
     let _ = client.terminate("test teardown");
     client.stop();
     let _ = worker.child.kill();
@@ -241,8 +295,15 @@ fn guard_kills_worker_when_heartbeats_stop() {
         "guard must terminate the worker after heartbeats stop: {}",
         control_details(&guard.store, "guard_kill")
     );
-    assert!(control_details(&guard.store, "guard_kill").contains("idle timeout"), "{}", control_details(&guard.store, "guard_kill"));
-    assert!(guard.child.try_wait().ok().flatten().is_none(), "guard process survives the kill");
+    assert!(
+        control_details(&guard.store, "guard_kill").contains("idle timeout"),
+        "{}",
+        control_details(&guard.store, "guard_kill")
+    );
+    assert!(
+        guard.child.try_wait().ok().flatten().is_none(),
+        "guard process survives the kill"
+    );
 }
 
 #[test]
@@ -255,8 +316,16 @@ fn terminate_directive_kills_worker_then_refuses() {
     client.register_worker(worker.child.id());
     wait_registered(&client);
     let reply = client.terminate("operator");
-    assert_eq!(reply.get("status").and_then(Json::as_str), Some("triggered"), "{reply:?}");
-    assert!(wait_killed(&mut worker.child), "{}", control_details(&guard.store, "guard_kill"));
+    assert_eq!(
+        reply.get("status").and_then(Json::as_str),
+        Some("triggered"),
+        "{reply:?}"
+    );
+    assert!(
+        wait_killed(&mut worker.child),
+        "{}",
+        control_details(&guard.store, "guard_kill")
+    );
     assert!(client.health().triggered);
     assert!(!client.health().ok);
     assert!(
@@ -283,24 +352,44 @@ fn unauthenticated_hello_refused_worker_untouched() {
     let mut guard = start_guard(&root, 2.0);
     let mut worker = spawn_sleeper();
     let mut stranger = TcpStream::connect(format!("127.0.0.1:{}", guard.port)).unwrap();
-    stranger.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    stranger.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    stranger
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stranger
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let _ = relay::read_frame(&mut stranger).expect("guest challenge");
-    send_frame(&mut stranger, &Json::object([
-        ("mac", Json::string("00".repeat(32))),
-        ("nonce", Json::string("x")),
-        ("type", Json::string("hello")),
-        ("version", Json::string(GUARD_PROTOCOL)),
-    ]));
+    send_frame(
+        &mut stranger,
+        &Json::object([
+            ("mac", Json::string("00".repeat(32))),
+            ("nonce", Json::string("x")),
+            ("type", Json::string("hello")),
+            ("version", Json::string(GUARD_PROTOCOL)),
+        ]),
+    );
     let reply = relay::read_frame(&mut stranger).expect("denied hello");
-    assert_eq!(reply.get("reason").and_then(Json::as_str), Some("denied_guard_auth"), "{reply:?}");
+    assert_eq!(
+        reply.get("reason").and_then(Json::as_str),
+        Some("denied_guard_auth"),
+        "{reply:?}"
+    );
     drop(stranger);
-    assert!(control_events(&guard.store).iter().any(|event| event == "guard_denied_hello"), "{:?}", control_events(&guard.store));
+    assert!(
+        control_events(&guard.store)
+            .iter()
+            .any(|event| event == "guard_denied_hello"),
+        "{:?}",
+        control_events(&guard.store)
+    );
     let client = link(&guard, Duration::from_millis(100), Duration::from_secs(1));
     client.start();
     client.register_worker(worker.child.id());
     wait_registered(&client);
-    assert!(worker.child.try_wait().ok().flatten().is_none(), "worker untouched by bad hello");
+    assert!(
+        worker.child.try_wait().ok().flatten().is_none(),
+        "worker untouched by bad hello"
+    );
     let _ = client.terminate("test teardown");
     client.stop();
     let _ = worker.child.kill();
@@ -312,7 +401,11 @@ fn tick_regression_is_anomaly() {
     let root = fresh("tick");
     let mut guard = start_guard(&root, 5.0);
     let (mut stream, hello, frame_key) = raw_hello(guard.port, &guard.key);
-    assert_eq!(hello.get("status").and_then(Json::as_str), Some("ok"), "{hello:?}");
+    assert_eq!(
+        hello.get("status").and_then(Json::as_str),
+        Some("ok"),
+        "{hello:?}"
+    );
     let sleeper = spawn_sleeper();
     send_frame(
         &mut stream,
@@ -327,7 +420,13 @@ fn tick_regression_is_anomaly() {
         )
         .unwrap(),
     );
-    assert_eq!(relay::read_frame(&mut stream).unwrap().get("status").and_then(Json::as_str), Some("ok"));
+    assert_eq!(
+        relay::read_frame(&mut stream)
+            .unwrap()
+            .get("status")
+            .and_then(Json::as_str),
+        Some("ok")
+    );
     send_frame(
         &mut stream,
         &relay::frame_signed(
@@ -338,7 +437,13 @@ fn tick_regression_is_anomaly() {
         )
         .unwrap(),
     );
-    assert_eq!(relay::read_frame(&mut stream).unwrap().get("status").and_then(Json::as_str), Some("ok"));
+    assert_eq!(
+        relay::read_frame(&mut stream)
+            .unwrap()
+            .get("status")
+            .and_then(Json::as_str),
+        Some("ok")
+    );
     send_frame(
         &mut stream,
         &relay::frame_signed(
@@ -350,9 +455,19 @@ fn tick_regression_is_anomaly() {
         .unwrap(),
     );
     let reply = relay::read_frame(&mut stream).unwrap();
-    assert_eq!(reply.get("reason").and_then(Json::as_str), Some("tick_regression"), "{reply:?}");
+    assert_eq!(
+        reply.get("reason").and_then(Json::as_str),
+        Some("tick_regression"),
+        "{reply:?}"
+    );
     drop(stream);
-    assert!(control_events(&guard.store).iter().any(|event| event == "guard_anomaly"), "{:?}", control_events(&guard.store));
+    assert!(
+        control_events(&guard.store)
+            .iter()
+            .any(|event| event == "guard_anomaly"),
+        "{:?}",
+        control_events(&guard.store)
+    );
     let _ = guard.child.kill();
 }
 
@@ -361,14 +476,30 @@ fn guard_is_exclusive_one_host_connection() {
     let root = fresh("busy");
     let mut guard = start_guard(&root, 5.0);
     let (first, hello, _frame_key) = raw_hello(guard.port, &guard.key);
-    assert_eq!(hello.get("status").and_then(Json::as_str), Some("ok"), "{hello:?}");
+    assert_eq!(
+        hello.get("status").and_then(Json::as_str),
+        Some("ok"),
+        "{hello:?}"
+    );
     thread::sleep(Duration::from_millis(200));
     let mut second = TcpStream::connect(format!("127.0.0.1:{}", guard.port)).unwrap();
-    second.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    second
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let reply = relay::read_frame(&mut second).expect("busy reply");
-    assert_eq!(reply.get("type").and_then(Json::as_str), Some("busy"), "{reply:?}");
+    assert_eq!(
+        reply.get("type").and_then(Json::as_str),
+        Some("busy"),
+        "{reply:?}"
+    );
     thread::sleep(Duration::from_millis(50));
-    assert!(control_events(&guard.store).iter().any(|event| event == "guard_busy"), "{:?}", control_events(&guard.store));
+    assert!(
+        control_events(&guard.store)
+            .iter()
+            .any(|event| event == "guard_busy"),
+        "{:?}",
+        control_events(&guard.store)
+    );
     drop(first);
     drop(second);
     let _ = guard.child.kill();
@@ -382,43 +513,69 @@ fn guard_loss_fails_runtime_closed() {
     let runtime = open_runtime(&root);
     runtime.attach_guard(client);
     assert!(
-        wait_until(Duration::from_secs(5), || flag(&runtime.health_report(), "watchdog")),
+        wait_until(Duration::from_secs(5), || flag(
+            &runtime.health_report(),
+            "watchdog"
+        )),
         "runtime must start guard-connected: {:?}",
         runtime.health_report()
     );
     fs::write(runtime.workspace_root.join("read.txt"), "ok").unwrap();
     let allowed = runtime.handle_envelope(&envelope(&runtime, "read.txt"));
-    assert_eq!(allowed.get("decision").and_then(Json::as_str), Some("ALLOW"), "{allowed:?}");
+    assert_eq!(
+        allowed.get("decision").and_then(Json::as_str),
+        Some("ALLOW"),
+        "{allowed:?}"
+    );
 
     let _ = guard.child.kill();
     let _ = guard.child.wait();
     assert!(
         wait_until(Duration::from_secs(8), || {
             let health = runtime.health_report();
-            !flag(&health, "watchdog") && health.get("worker_accepts_work").and_then(Json::as_bool) == Some(false)
+            !flag(&health, "watchdog")
+                && health.get("worker_accepts_work").and_then(Json::as_bool) == Some(false)
         }),
         "watchdog must fail closed on guard loss: {:?}",
         runtime.health_report()
     );
     let report = runtime.health_report();
     assert_eq!(
-        report.get("watchdog_guard").and_then(|guard| guard.get("ok")).and_then(Json::as_bool),
+        report
+            .get("watchdog_guard")
+            .and_then(|guard| guard.get("ok"))
+            .and_then(Json::as_bool),
         Some(false),
         "{report:?}"
     );
     let denied = runtime.handle_envelope(&envelope(&runtime, "read.txt"));
-    assert_eq!(denied.get("decision").and_then(Json::as_str), Some("DENY"), "{denied:?}");
-    assert_eq!(denied.get("reason_code").and_then(Json::as_str), Some("denied_worker_suspended"), "{denied:?}");
+    assert_eq!(
+        denied.get("decision").and_then(Json::as_str),
+        Some("DENY"),
+        "{denied:?}"
+    );
+    assert_eq!(
+        denied.get("reason_code").and_then(Json::as_str),
+        Some("denied_worker_suspended"),
+        "{denied:?}"
+    );
     let events = runtime.audit_summary();
     assert!(
-        events.get("by_event_type").and_then(|counts| counts.get("guard_failure")).is_some(),
+        events
+            .get("by_event_type")
+            .and_then(|counts| counts.get("guard_failure"))
+            .is_some(),
         "{events:?}"
     );
     runtime.close();
 }
 
 fn flag(report: &Json, key: &str) -> bool {
-    report.get(key).and_then(|value| value.get("ok")).and_then(Json::as_bool) == Some(true)
+    report
+        .get(key)
+        .and_then(|value| value.get("ok"))
+        .and_then(Json::as_bool)
+        == Some(true)
 }
 
 #[test]
@@ -426,32 +583,66 @@ fn replayed_hello_nonce_is_refused() {
     let root = fresh("replay");
     let mut guard = start_guard(&root, 5.0);
     let mut first = TcpStream::connect(format!("127.0.0.1:{}", guard.port)).unwrap();
-    first.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    first.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    first
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    first
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let first_challenge = relay::read_frame(&mut first).expect("guest challenge");
-    assert_eq!(first_challenge.get("type").and_then(Json::as_str), Some("challenge"), "{first_challenge:?}");
-    let challenge_value = first_challenge.get("challenge").and_then(Json::as_str).expect("challenge value").to_string();
+    assert_eq!(
+        first_challenge.get("type").and_then(Json::as_str),
+        Some("challenge"),
+        "{first_challenge:?}"
+    );
+    let challenge_value = first_challenge
+        .get("challenge")
+        .and_then(Json::as_str)
+        .expect("challenge value")
+        .to_string();
     let nonce = new_id("guard-");
     let hello = Json::object([
         ("challenge", Json::string(challenge_value.clone())),
-        ("mac", Json::string(watchguard::sign_guard_hello(&guard.key, &nonce, &challenge_value))),
+        (
+            "mac",
+            Json::string(watchguard::sign_guard_hello(
+                &guard.key,
+                &nonce,
+                &challenge_value,
+            )),
+        ),
         ("nonce", Json::string(nonce)),
         ("type", Json::string("hello")),
         ("version", Json::string(GUARD_PROTOCOL)),
     ]);
     let bytes = relay::frame(&hello).unwrap();
     first.write_all(&bytes).unwrap();
-    assert_eq!(relay::read_frame(&mut first).unwrap().get("status").and_then(Json::as_str), Some("ok"));
+    assert_eq!(
+        relay::read_frame(&mut first)
+            .unwrap()
+            .get("status")
+            .and_then(Json::as_str),
+        Some("ok")
+    );
     drop(first);
     thread::sleep(Duration::from_millis(200));
     let mut replay = TcpStream::connect(format!("127.0.0.1:{}", guard.port)).unwrap();
-    replay.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    replay
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     replay.set_nodelay(true).unwrap();
     let _ = relay::read_frame(&mut replay).unwrap(); // challenge from the same process
     replay.write_all(&bytes).unwrap();
     let reply = relay::read_frame(&mut replay).unwrap();
-    assert_eq!(reply.get("status").and_then(Json::as_str), Some("error"), "{reply:?}");
-    assert_eq!(reply.get("reason").and_then(Json::as_str), Some("denied_guard_auth"));
+    assert_eq!(
+        reply.get("status").and_then(Json::as_str),
+        Some("error"),
+        "{reply:?}"
+    );
+    assert_eq!(
+        reply.get("reason").and_then(Json::as_str),
+        Some("denied_guard_auth")
+    );
     drop(replay);
     assert!(
         control_details(&guard.store, "guard_denied_hello").contains("replayed"),
@@ -480,35 +671,67 @@ fn restart_with_same_key_refuses_a_captured_hello() {
     sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     sock.set_nodelay(true).unwrap();
     let challenge = relay::read_frame(&mut sock).expect("guest challenge");
-    assert_eq!(challenge.get("type").and_then(Json::as_str), Some("challenge"), "{challenge:?}");
-    let challenge_value = challenge.get("challenge").and_then(Json::as_str).expect("challenge value").to_string();
+    assert_eq!(
+        challenge.get("type").and_then(Json::as_str),
+        Some("challenge"),
+        "{challenge:?}"
+    );
+    let challenge_value = challenge
+        .get("challenge")
+        .and_then(Json::as_str)
+        .expect("challenge value")
+        .to_string();
     let nonce = new_id("guard-");
     let hello = Json::object([
         ("challenge", Json::string(challenge_value.clone())),
-        ("mac", Json::string(watchguard::sign_guard_hello(&key, &nonce, &challenge_value))),
+        (
+            "mac",
+            Json::string(watchguard::sign_guard_hello(&key, &nonce, &challenge_value)),
+        ),
         ("nonce", Json::string(nonce)),
         ("type", Json::string("hello")),
         ("version", Json::string(GUARD_PROTOCOL)),
     ]);
     let bytes = relay::frame(&hello).unwrap();
     sock.write_all(&bytes).unwrap();
-    assert_eq!(relay::read_frame(&mut sock).unwrap().get("status").and_then(Json::as_str), Some("ok"));
+    assert_eq!(
+        relay::read_frame(&mut sock)
+            .unwrap()
+            .get("status")
+            .and_then(Json::as_str),
+        Some("ok")
+    );
     drop(sock);
     first.stop();
 
     let second = WatchGuardServer::bind(&root, key.clone(), Duration::from_secs(5)).unwrap();
     second.start();
     let mut replay = TcpStream::connect(format!("127.0.0.1:{}", second.port())).unwrap();
-    replay.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    replay
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     replay.set_nodelay(true).unwrap();
     let _ = relay::read_frame(&mut replay).unwrap(); // this process's fresh challenge
     replay.write_all(&bytes).unwrap();
     let reply = relay::read_frame(&mut replay).unwrap();
-    assert_eq!(reply.get("status").and_then(Json::as_str), Some("error"), "{reply:?}");
-    assert_eq!(reply.get("reason").and_then(Json::as_str), Some("denied_guard_auth"));
+    assert_eq!(
+        reply.get("status").and_then(Json::as_str),
+        Some("error"),
+        "{reply:?}"
+    );
+    assert_eq!(
+        reply.get("reason").and_then(Json::as_str),
+        Some("denied_guard_auth")
+    );
     drop(replay);
     // A legit host still registers with the fresh challenge.
-    let legit = WatchGuardLink::with_timing("127.0.0.1", second.port(), key, Duration::from_millis(100), Duration::from_secs(1));
+    let legit = WatchGuardLink::with_timing(
+        "127.0.0.1",
+        second.port(),
+        key,
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+    );
     legit.start();
     assert!(
         wait_until(Duration::from_secs(5), || legit.health().connected),

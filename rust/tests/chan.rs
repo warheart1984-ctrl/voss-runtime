@@ -143,7 +143,8 @@ fn adapter_cannot_send_prompt() {
 fn bootstrap_round_trip() {
     let secret = key();
     let sid = new_id("chan-");
-    let text = String::from_utf8(canonical_bytes(&chan::chan_bootstrap(&secret, &sid)).unwrap()).unwrap();
+    let text =
+        String::from_utf8(canonical_bytes(&chan::chan_bootstrap(&secret, &sid)).unwrap()).unwrap();
     let (loaded, loaded_sid) = chan::read_bootstrap(&text).unwrap();
     assert_eq!(loaded, secret);
     assert_eq!(loaded_sid, sid);

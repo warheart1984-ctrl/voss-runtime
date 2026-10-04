@@ -43,18 +43,15 @@ impl KeyRing {
 
     pub fn load_or_create(directory: impl AsRef<Path>) -> Result<Self, KeyError> {
         let directory = directory.as_ref();
-        fs::create_dir_all(directory).map_err(|error| {
-            KeyError::new(format!("cannot create key directory: {error}"))
-        })?;
+        fs::create_dir_all(directory)
+            .map_err(|error| KeyError::new(format!("cannot create key directory: {error}")))?;
         let path = directory.join("keys.json");
         for _ in 0..50 {
             if path.is_file() {
-                let text = fs::read_to_string(&path).map_err(|error| {
-                    KeyError::new(format!("cannot load key store: {error}"))
-                })?;
-                let value = loads_strict(&text).map_err(|_| {
-                    KeyError::new("cannot load key store: invalid key file")
-                })?;
+                let text = fs::read_to_string(&path)
+                    .map_err(|error| KeyError::new(format!("cannot load key store: {error}")))?;
+                let value = loads_strict(&text)
+                    .map_err(|_| KeyError::new("cannot load key store: invalid key file"))?;
                 let policy = decode_key(value.get("policy_key"))?;
                 let audit = decode_key(value.get("audit_key"))?;
                 return Self::new(policy, audit);

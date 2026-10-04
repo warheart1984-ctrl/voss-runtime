@@ -32,7 +32,9 @@ fn start_relay(root: &Path, timeout: f64) -> RelayProc {
     fs::create_dir_all(root).unwrap();
     let store = root.join("relay_store");
     fs::create_dir_all(&store).unwrap();
-    let key: Vec<u8> = (0u8..32).map(|index| index.wrapping_mul(7).wrapping_add(3)).collect();
+    let key: Vec<u8> = (0u8..32)
+        .map(|index| index.wrapping_mul(7).wrapping_add(3))
+        .collect();
     let port_file = root.join("relay_port.txt");
     let child = Command::new(std::env::var("CARGO_BIN_EXE_relay").expect("relay binary"))
         .arg("--store")
@@ -90,7 +92,14 @@ fn attach(runtime: &VossRuntime, root: &Path, relay: &RelayProc) {
     ));
 }
 
-fn envelope(runtime: &VossRuntime, request_id: &str, action: &str, resource: Json, payload: Json, constraints: Json) -> String {
+fn envelope(
+    runtime: &VossRuntime,
+    request_id: &str,
+    action: &str,
+    resource: Json,
+    payload: Json,
+    constraints: Json,
+) -> String {
     let value = Json::object([
         ("version", Json::string("1")),
         ("request_id", Json::string(request_id)),
@@ -106,17 +115,33 @@ fn envelope(runtime: &VossRuntime, request_id: &str, action: &str, resource: Jso
 
 fn approve(runtime: &VossRuntime, proposal: &str) {
     let pending = runtime.handle_envelope(proposal);
-    assert_eq!(pending.get("decision").and_then(Json::as_str), Some("REQUIRE_APPROVAL"), "{pending:?}");
+    assert_eq!(
+        pending.get("decision").and_then(Json::as_str),
+        Some("REQUIRE_APPROVAL"),
+        "{pending:?}"
+    );
     let decided = runtime.resolve_approval(
-        pending.get("approval_request_id").and_then(Json::as_str).unwrap_or(""),
+        pending
+            .get("approval_request_id")
+            .and_then(Json::as_str)
+            .unwrap_or(""),
         "APPROVE",
         "relay-test",
     );
-    assert_eq!(decided.get("decision").and_then(Json::as_str), Some("ALLOW"), "{decided:?}");
+    assert_eq!(
+        decided.get("decision").and_then(Json::as_str),
+        Some("ALLOW"),
+        "{decided:?}"
+    );
 }
 
 fn lines_of(path: &Path) -> Vec<String> {
-    fs::read_to_string(path).unwrap_or_default().lines().filter(|line| !line.trim().is_empty()).map(|line| format!("{line}\n")).collect()
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| format!("{line}\n"))
+        .collect()
 }
 
 fn store_lines(store: &Path) -> Vec<String> {
@@ -128,7 +153,10 @@ fn control_events(store: &Path) -> Vec<String> {
         .iter()
         .filter_map(|line| {
             voss::loads_strict(line.trim()).ok().and_then(|value| {
-                value.get("event").and_then(Json::as_str).map(str::to_string)
+                value
+                    .get("event")
+                    .and_then(Json::as_str)
+                    .map(str::to_string)
             })
         })
         .collect()
@@ -146,10 +174,22 @@ fn wait_until(mut ready: impl FnMut() -> bool) {
 
 fn read_challenge(stream: &mut TcpStream, key: &[u8]) -> String {
     let challenge = relay::read_frame(stream).unwrap();
-    assert_eq!(challenge.get("type").and_then(Json::as_str), Some("challenge"), "{challenge:?}");
-    let value = challenge.get("challenge").and_then(Json::as_str).expect("challenge value").to_string();
+    assert_eq!(
+        challenge.get("type").and_then(Json::as_str),
+        Some("challenge"),
+        "{challenge:?}"
+    );
+    let value = challenge
+        .get("challenge")
+        .and_then(Json::as_str)
+        .expect("challenge value")
+        .to_string();
     let mac = relay::sign_challenge(key, &value);
-    assert_eq!(challenge.get("mac").and_then(Json::as_str), Some(mac.as_str()), "{challenge:?}");
+    assert_eq!(
+        challenge.get("mac").and_then(Json::as_str),
+        Some(mac.as_str()),
+        "{challenge:?}"
+    );
     value
 }
 
@@ -159,24 +199,38 @@ fn raw_hello(key: &[u8], nonce: &str, challenge: &str) -> Vec<u8> {
         ("version", Json::string(RELAY_PROTOCOL)),
         ("challenge", Json::string(challenge)),
         ("nonce", Json::string(nonce)),
-        ("mac", Json::string(relay::sign_hello(key, nonce, challenge))),
+        (
+            "mac",
+            Json::string(relay::sign_hello(key, nonce, challenge)),
+        ),
     ]);
     relay::frame(&hello).unwrap()
 }
 
 fn handshake(port: u16, key: &[u8]) -> (TcpStream, Vec<u8>) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     stream.set_nodelay(true).unwrap();
     let challenge = read_challenge(&mut stream, key);
     let nonce = new_id("relay-");
     let bytes = raw_hello(key, &nonce, &challenge);
     stream.write_all(&bytes).unwrap();
     let reply = relay::read_frame(&mut stream).unwrap();
-    assert_eq!(reply.get("type").and_then(Json::as_str), Some("hello_ok"), "{reply:?}");
+    assert_eq!(
+        reply.get("type").and_then(Json::as_str),
+        Some("hello_ok"),
+        "{reply:?}"
+    );
     let frame_key = relay::derive_session_key(RELAY_PROTOCOL, key, &challenge, &nonce);
-    assert!(relay::frame_is_authed(&reply, RELAY_PROTOCOL, &frame_key), "{reply:?}");
+    assert!(
+        relay::frame_is_authed(&reply, RELAY_PROTOCOL, &frame_key),
+        "{reply:?}"
+    );
     assert_eq!(reply.get("seq").and_then(Json::as_i64), Some(1));
     let begin = relay::frame_signed(
         RELAY_PROTOCOL,
@@ -187,14 +241,24 @@ fn handshake(port: u16, key: &[u8]) -> (TcpStream, Vec<u8>) {
     .unwrap();
     stream.write_all(&relay::frame(&begin).unwrap()).unwrap();
     let ready = relay::read_frame(&mut stream).unwrap();
-    assert_eq!(ready.get("type").and_then(Json::as_str), Some("stream_ready"), "{ready:?}");
-    assert!(relay::frame_is_authed(&ready, RELAY_PROTOCOL, &frame_key), "{ready:?}");
+    assert_eq!(
+        ready.get("type").and_then(Json::as_str),
+        Some("stream_ready"),
+        "{ready:?}"
+    );
+    assert!(
+        relay::frame_is_authed(&ready, RELAY_PROTOCOL, &frame_key),
+        "{ready:?}"
+    );
     assert_eq!(ready.get("seq").and_then(Json::as_i64), Some(2));
     (stream, frame_key)
 }
 
 fn raw_record(event_id: &str, content: &str) -> Json {
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
     Json::object([
         ("schema", Json::string("voss.audit.1")),
         ("event_id", Json::string(event_id)),
@@ -220,28 +284,34 @@ fn relay_mirrors_audit_and_verifies() {
         Json::empty_object(),
     ));
     for index in 0..3 {
-        approve(&runtime, &envelope(
+        approve(
             &runtime,
-            &format!("relay-write-{index}"),
-            "workspace.write",
-            Json::object([("path", Json::string(format!("f{index}.txt")))]),
-            Json::object([("content", Json::string(format!("c{index}")))]),
-            Json::empty_object(),
-        ));
-        approve(&runtime, &envelope(
+            &envelope(
+                &runtime,
+                &format!("relay-write-{index}"),
+                "workspace.write",
+                Json::object([("path", Json::string(format!("f{index}.txt")))]),
+                Json::object([("content", Json::string(format!("c{index}")))]),
+                Json::empty_object(),
+            ),
+        );
+        approve(
             &runtime,
-            &format!("relay-send-{index}"),
-            "external.send_mock",
-            Json::object([
-                ("service", Json::string("mail")),
-                ("recipient", Json::string("alex@example.invalid")),
-            ]),
-            Json::object([
-                ("subject", Json::string("hi")),
-                ("body", Json::string(format!("body-{index}"))),
-            ]),
-            Json::object([("send_once", Json::Bool(true))]),
-        ));
+            &envelope(
+                &runtime,
+                &format!("relay-send-{index}"),
+                "external.send_mock",
+                Json::object([
+                    ("service", Json::string("mail")),
+                    ("recipient", Json::string("alex@example.invalid")),
+                ]),
+                Json::object([
+                    ("subject", Json::string("hi")),
+                    ("body", Json::string(format!("body-{index}"))),
+                ]),
+                Json::object([("send_once", Json::Bool(true))]),
+            ),
+        );
     }
     let mut forged = envelope(
         &runtime,
@@ -264,7 +334,10 @@ fn relay_mirrors_audit_and_verifies() {
         "store={} audit={} relay={:?} events={:?}",
         store_lines(&relay.store).len(),
         audit.len(),
-        health.get("relay").and_then(|value| value.get("error")).and_then(Json::as_str),
+        health
+            .get("relay")
+            .and_then(|value| value.get("error"))
+            .and_then(Json::as_str),
         control_events(&relay.store)
     );
     assert_eq!(store_lines(&relay.store), audit);
@@ -282,37 +355,59 @@ fn restart_redelivery_is_idempotent() {
     let relay = start_relay(&root, 15.0);
     let first = open_runtime(&root);
     attach(&first, &root, &relay);
-    approve(&first, &envelope(
+    approve(
         &first,
-        "relay-a",
-        "workspace.write",
-        Json::object([("path", Json::string("a.txt"))]),
-        Json::object([("content", Json::string("a"))]),
-        Json::empty_object(),
-    ));
+        &envelope(
+            &first,
+            "relay-a",
+            "workspace.write",
+            Json::object([("path", Json::string("a.txt"))]),
+            Json::object([("content", Json::string("a"))]),
+            Json::empty_object(),
+        ),
+    );
     first.close();
 
     let second = open_runtime(&root);
     attach(&second, &root, &relay);
-    approve(&second, &envelope(
+    approve(
         &second,
-        "relay-b",
-        "workspace.write",
-        Json::object([("path", Json::string("b.txt"))]),
-        Json::object([("content", Json::string("b"))]),
-        Json::empty_object(),
-    ));
+        &envelope(
+            &second,
+            "relay-b",
+            "workspace.write",
+            Json::object([("path", Json::string("b.txt"))]),
+            Json::object([("content", Json::string("b"))]),
+            Json::empty_object(),
+        ),
+    );
     wait_until(|| {
-        second.health_report().get("relay").and_then(|value| value.get("ok")).and_then(Json::as_bool) == Some(true)
+        second
+            .health_report()
+            .get("relay")
+            .and_then(|value| value.get("ok"))
+            .and_then(Json::as_bool)
+            == Some(true)
     });
     assert_eq!(
-        second.health_report().get("relay").and_then(|value| value.get("ok")).and_then(Json::as_bool),
+        second
+            .health_report()
+            .get("relay")
+            .and_then(|value| value.get("ok"))
+            .and_then(Json::as_bool),
         Some(true)
     );
     second.close();
-    assert_eq!(store_lines(&relay.store), lines_of(&root.join("audit.jsonl")));
+    assert_eq!(
+        store_lines(&relay.store),
+        lines_of(&root.join("audit.jsonl"))
+    );
     let keys = KeyRing::load_or_create(&root).unwrap();
-    assert!(AuditLog::open(relay.store.join("relay-audit.jsonl"), keys).unwrap().verify_integrity());
+    assert!(
+        AuditLog::open(relay.store.join("relay-audit.jsonl"), keys)
+            .unwrap()
+            .verify_integrity()
+    );
     assert!(!control_events(&relay.store).contains(&"relay_violation".to_string()));
     let _ = fs::remove_dir_all(root);
 }
@@ -325,13 +420,37 @@ fn health_report_exposes_relay() {
     attach(&runtime, &root, &relay);
     wait_until(|| {
         let health = runtime.health_report();
-        health.get("relay").and_then(|value| value.get("connected")).and_then(Json::as_bool) == Some(true)
-            && health.get("relay").and_then(|value| value.get("ok")).and_then(Json::as_bool) == Some(true)
+        health
+            .get("relay")
+            .and_then(|value| value.get("connected"))
+            .and_then(Json::as_bool)
+            == Some(true)
+            && health
+                .get("relay")
+                .and_then(|value| value.get("ok"))
+                .and_then(Json::as_bool)
+                == Some(true)
     });
     let health = runtime.health_report();
-    assert!(health.get("relay").is_some_and(|value| !matches!(value, Json::Null)));
-    assert_eq!(health.get("relay").and_then(|value| value.get("ok")).and_then(Json::as_bool), Some(true));
-    assert_eq!(health.get("relay").and_then(|value| value.get("connected")).and_then(Json::as_bool), Some(true));
+    assert!(
+        health
+            .get("relay")
+            .is_some_and(|value| !matches!(value, Json::Null))
+    );
+    assert_eq!(
+        health
+            .get("relay")
+            .and_then(|value| value.get("ok"))
+            .and_then(Json::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        health
+            .get("relay")
+            .and_then(|value| value.get("connected"))
+            .and_then(Json::as_bool),
+        Some(true)
+    );
     runtime.close();
     let _ = fs::remove_dir_all(root);
 }
@@ -341,10 +460,16 @@ fn probe_without_credential_is_refused_and_harmless() {
     let root = std::env::temp_dir().join(format!("voss-relay-{}", new_id("")));
     let relay = start_relay(&root, 15.0);
     let mut stream = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     stream.set_nodelay(true).unwrap();
     let challenge = relay::read_frame(&mut stream).unwrap();
-    assert_eq!(challenge.get("type").and_then(Json::as_str), Some("challenge"), "{challenge:?}");
+    assert_eq!(
+        challenge.get("type").and_then(Json::as_str),
+        Some("challenge"),
+        "{challenge:?}"
+    );
     let hello = Json::object([
         ("type", Json::string("hello")),
         ("version", Json::string(RELAY_PROTOCOL)),
@@ -355,28 +480,46 @@ fn probe_without_credential_is_refused_and_harmless() {
     stream.write_all(&relay::frame(&hello).unwrap()).unwrap();
     let reply = relay::read_frame(&mut stream).unwrap();
     assert_eq!(reply.get("type").and_then(Json::as_str), Some("violation"));
-    assert_eq!(reply.get("reason").and_then(Json::as_str), Some("denied_hello_auth"));
+    assert_eq!(
+        reply.get("reason").and_then(Json::as_str),
+        Some("denied_hello_auth")
+    );
     drop(stream);
     thread::sleep(Duration::from_millis(200));
-    assert_eq!(control_events(&relay.store).iter().filter(|event| *event == "relay_denied_hello").count(), 1);
+    assert_eq!(
+        control_events(&relay.store)
+            .iter()
+            .filter(|event| *event == "relay_denied_hello")
+            .count(),
+        1
+    );
     assert!(store_lines(&relay.store).is_empty());
     let runtime = open_runtime(&root);
     attach(&runtime, &root, &relay);
-    approve(&runtime, &envelope(
+    approve(
         &runtime,
-        "relay-probe",
-        "workspace.write",
-        Json::object([("path", Json::string("p.txt"))]),
-        Json::object([("content", Json::string("p"))]),
-        Json::empty_object(),
-    ));
+        &envelope(
+            &runtime,
+            "relay-probe",
+            "workspace.write",
+            Json::object([("path", Json::string("p.txt"))]),
+            Json::object([("content", Json::string("p"))]),
+            Json::empty_object(),
+        ),
+    );
     let health = runtime.health_report();
     runtime.close();
     assert!(
         !store_lines(&relay.store).is_empty(),
         "error={:?} connected={:?} events={:?}",
-        health.get("relay").and_then(|value| value.get("error")).and_then(Json::as_str),
-        health.get("relay").and_then(|value| value.get("connected")).and_then(Json::as_bool),
+        health
+            .get("relay")
+            .and_then(|value| value.get("error"))
+            .and_then(Json::as_str),
+        health
+            .get("relay")
+            .and_then(|value| value.get("connected"))
+            .and_then(Json::as_bool),
         control_events(&relay.store)
     );
     assert!(!control_events(&relay.store).contains(&"relay_violation".to_string()));
@@ -408,21 +551,38 @@ fn sequence_gap_compromises_store() {
     assert!(control_events(&relay.store).contains(&"relay_violation".to_string()));
     assert!(store_lines(&relay.store).is_empty());
     let mut again = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
-    again.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    again
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     again.set_nodelay(true).unwrap();
     let challenge = relay::read_frame(&mut again).unwrap();
-    assert_eq!(challenge.get("type").and_then(Json::as_str), Some("challenge"), "{challenge:?}");
+    assert_eq!(
+        challenge.get("type").and_then(Json::as_str),
+        Some("challenge"),
+        "{challenge:?}"
+    );
     let nonce = new_id("relay-");
     let hello = Json::object([
         ("type", Json::string("hello")),
         ("version", Json::string(RELAY_PROTOCOL)),
         ("challenge", Json::string("stale")),
         ("nonce", Json::string(&nonce)),
-        ("mac", Json::string(relay::sign_hello(&relay.key, &nonce, &format!("stale-{nonce}")))),
+        (
+            "mac",
+            Json::string(relay::sign_hello(
+                &relay.key,
+                &nonce,
+                &format!("stale-{nonce}"),
+            )),
+        ),
     ]);
     again.write_all(&relay::frame(&hello).unwrap()).unwrap();
     let reply = relay::read_frame(&mut again).unwrap();
-    assert_eq!(reply.get("type").and_then(Json::as_str), Some("refused"), "{reply:?}");
+    assert_eq!(
+        reply.get("type").and_then(Json::as_str),
+        Some("refused"),
+        "{reply:?}"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -442,7 +602,13 @@ fn duplicate_contradiction_fails_closed() {
     )
     .unwrap();
     stream.write_all(&relay::frame(&first).unwrap()).unwrap();
-    assert_eq!(relay::read_frame(&mut stream).unwrap().get("type").and_then(Json::as_str), Some("ack"));
+    assert_eq!(
+        relay::read_frame(&mut stream)
+            .unwrap()
+            .get("type")
+            .and_then(Json::as_str),
+        Some("ack")
+    );
     let second = relay::frame_signed(
         RELAY_PROTOCOL,
         &frame_key,
@@ -456,7 +622,13 @@ fn duplicate_contradiction_fails_closed() {
     stream.write_all(&relay::frame(&second).unwrap()).unwrap();
     let reply = relay::read_frame(&mut stream).unwrap();
     assert_eq!(reply.get("type").and_then(Json::as_str), Some("violation"));
-    assert!(reply.get("reason").and_then(Json::as_str).unwrap_or("").starts_with("duplicate_contradiction"));
+    assert!(
+        reply
+            .get("reason")
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .starts_with("duplicate_contradiction")
+    );
     drop(stream);
     thread::sleep(Duration::from_millis(200));
     assert_eq!(store_lines(&relay.store).len(), 1);
@@ -469,7 +641,9 @@ fn oversize_frame_refused() {
     let root = std::env::temp_dir().join(format!("voss-relay-{}", new_id("")));
     let relay = start_relay(&root, 15.0);
     let mut stream = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     stream.set_nodelay(true).unwrap();
     stream.write_all(&[0xff, 0xff, 0xff, 0xff]).unwrap();
     let mut buffer = [0u8; 4096];
@@ -477,7 +651,10 @@ fn oversize_frame_refused() {
     drop(stream);
     thread::sleep(Duration::from_millis(200));
     let events = control_events(&relay.store);
-    assert!(events.iter().any(|event| event.contains("oversize_frame")) || events.iter().any(|event| event == "relay_violation"));
+    assert!(
+        events.iter().any(|event| event.contains("oversize_frame"))
+            || events.iter().any(|event| event == "relay_violation")
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -499,7 +676,13 @@ fn stale_flagged_then_recovered() {
     )
     .unwrap();
     stream.write_all(&relay::frame(&message).unwrap()).unwrap();
-    assert_eq!(relay::read_frame(&mut stream).unwrap().get("type").and_then(Json::as_str), Some("ack"));
+    assert_eq!(
+        relay::read_frame(&mut stream)
+            .unwrap()
+            .get("type")
+            .and_then(Json::as_str),
+        Some("ack")
+    );
     wait_until(|| control_events(&relay.store).contains(&"relay_recovered".to_string()));
     assert!(control_events(&relay.store).contains(&"relay_recovered".to_string()));
     let _ = fs::remove_dir_all(root);
@@ -509,7 +692,13 @@ fn stale_flagged_then_recovered() {
 fn start_stop_and_port() {
     let root = std::env::temp_dir().join(format!("voss-relay-{}", new_id("")));
     fs::create_dir_all(&root).unwrap();
-    let server = AuditRelayServer::bind(&root, KeyRing::generate(), vec![9u8; 32], Duration::from_secs(1)).unwrap();
+    let server = AuditRelayServer::bind(
+        &root,
+        KeyRing::generate(),
+        vec![9u8; 32],
+        Duration::from_secs(1),
+    )
+    .unwrap();
     server.start();
     assert!(server.port() > 0);
     server.stop();
@@ -557,7 +746,10 @@ fn tampered_store_stays_compromised_on_recovery() {
         Duration::from_secs(1),
     )
     .unwrap();
-    assert!(broken.compromised(), "a rewritten chain hash must not be trusted");
+    assert!(
+        broken.compromised(),
+        "a rewritten chain hash must not be trusted"
+    );
     broken.stop();
     let _ = fs::remove_dir_all(root);
 }
@@ -567,40 +759,57 @@ fn replayed_hello_nonce_is_refused_and_not_compromising() {
     let root = std::env::temp_dir().join(format!("voss-relay-replay-{}", new_id("")));
     let relay = start_relay(&root, 15.0);
     let mut first = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
-    first.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    first
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     first.set_nodelay(true).unwrap();
     let challenge = read_challenge(&mut first, &relay.key);
     let nonce = new_id("relay-");
     let bytes = raw_hello(&relay.key, &nonce, &challenge);
     first.write_all(&bytes).unwrap();
     assert_eq!(
-        relay::read_frame(&mut first).unwrap().get("type").and_then(Json::as_str),
+        relay::read_frame(&mut first)
+            .unwrap()
+            .get("type")
+            .and_then(Json::as_str),
         Some("hello_ok")
     );
     drop(first);
     thread::sleep(Duration::from_millis(200));
     let mut replay = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
-    replay.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    replay
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     replay.set_nodelay(true).unwrap();
     let _ = relay::read_frame(&mut replay).unwrap(); // challenge from the same process
     replay.write_all(&bytes).unwrap();
     let reply = relay::read_frame(&mut replay).unwrap();
     assert_eq!(reply.get("type").and_then(Json::as_str), Some("violation"));
-    assert_eq!(reply.get("reason").and_then(Json::as_str), Some("denied_hello_auth"));
+    assert_eq!(
+        reply.get("reason").and_then(Json::as_str),
+        Some("denied_hello_auth")
+    );
     drop(replay);
     let details = lines_of(&relay.store.join("relay-control.jsonl"));
     assert!(
-        details.iter().any(|line| line.contains("replayed_hello_nonce")),
+        details
+            .iter()
+            .any(|line| line.contains("replayed_hello_nonce")),
         "{details:?}"
     );
     let mut fresh = TcpStream::connect(("127.0.0.1", relay.port)).unwrap();
-    fresh.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    fresh
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     fresh.set_nodelay(true).unwrap();
     let challenge = read_challenge(&mut fresh, &relay.key);
     let bytes = raw_hello(&relay.key, &new_id("relay-"), &challenge);
     fresh.write_all(&bytes).unwrap();
     assert_eq!(
-        relay::read_frame(&mut fresh).unwrap().get("type").and_then(Json::as_str),
+        relay::read_frame(&mut fresh)
+            .unwrap()
+            .get("type")
+            .and_then(Json::as_str),
         Some("hello_ok")
     );
     let _ = fs::remove_dir_all(root);
@@ -621,13 +830,18 @@ fn restart_with_same_key_refuses_a_captured_hello() {
     .unwrap();
     first.start();
     let mut stream = TcpStream::connect(("127.0.0.1", first.port())).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     stream.set_nodelay(true).unwrap();
     let challenge = read_challenge(&mut stream, &key);
     let bytes = raw_hello(&key, &new_id("relay-"), &challenge);
     stream.write_all(&bytes).unwrap();
     assert_eq!(
-        relay::read_frame(&mut stream).unwrap().get("type").and_then(Json::as_str),
+        relay::read_frame(&mut stream)
+            .unwrap()
+            .get("type")
+            .and_then(Json::as_str),
         Some("hello_ok")
     );
     drop(stream);
@@ -642,22 +856,34 @@ fn restart_with_same_key_refuses_a_captured_hello() {
     .unwrap();
     second.start();
     let mut replay = TcpStream::connect(("127.0.0.1", second.port())).unwrap();
-    replay.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    replay
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     replay.set_nodelay(true).unwrap();
     let _ = relay::read_frame(&mut replay).unwrap(); // this process's fresh challenge
     replay.write_all(&bytes).unwrap();
     let reply = relay::read_frame(&mut replay).unwrap();
     assert_eq!(reply.get("type").and_then(Json::as_str), Some("violation"));
-    assert_eq!(reply.get("reason").and_then(Json::as_str), Some("denied_hello_auth"));
+    assert_eq!(
+        reply.get("reason").and_then(Json::as_str),
+        Some("denied_hello_auth")
+    );
     drop(replay);
     // A legit client holding the same key still connects (fresh challenge).
     let mut legit = TcpStream::connect(("127.0.0.1", second.port())).unwrap();
-    legit.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    legit
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     legit.set_nodelay(true).unwrap();
     let challenge = read_challenge(&mut legit, &key);
-    legit.write_all(&raw_hello(&key, &new_id("relay-"), &challenge)).unwrap();
+    legit
+        .write_all(&raw_hello(&key, &new_id("relay-"), &challenge))
+        .unwrap();
     assert_eq!(
-        relay::read_frame(&mut legit).unwrap().get("type").and_then(Json::as_str),
+        relay::read_frame(&mut legit)
+            .unwrap()
+            .get("type")
+            .and_then(Json::as_str),
         Some("hello_ok")
     );
     second.stop();

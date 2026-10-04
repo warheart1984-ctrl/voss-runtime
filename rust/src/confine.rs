@@ -50,7 +50,10 @@ mod windows {
     }
 
     unsafe extern "system" {
-        fn CreateJobObjectW(attrs: *mut core::ffi::c_void, name: *const u16) -> *mut core::ffi::c_void;
+        fn CreateJobObjectW(
+            attrs: *mut core::ffi::c_void,
+            name: *const u16,
+        ) -> *mut core::ffi::c_void;
         fn SetInformationJobObject(
             job: *mut core::ffi::c_void,
             class: u32,
@@ -58,7 +61,10 @@ mod windows {
             length: u32,
         ) -> i32;
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
-        fn AssignProcessToJobObject(job: *mut core::ffi::c_void, process: *mut core::ffi::c_void) -> i32;
+        fn AssignProcessToJobObject(
+            job: *mut core::ffi::c_void,
+            process: *mut core::ffi::c_void,
+        ) -> i32;
         fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
         fn GetLastError() -> u32;
     }
@@ -87,7 +93,8 @@ mod windows {
                 basic: BasicLimit {
                     per_process_user_time: 0,
                     per_job_user_time: 0,
-                    limit_flags: JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    limit_flags: JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+                        | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                     minimum_working_set: 0,
                     maximum_working_set: 0,
                     active_process_limit: 1,

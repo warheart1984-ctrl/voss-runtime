@@ -14,12 +14,19 @@ fn main() {
     let keyring_dir = argument("--keyring-dir");
     let port_file = argument("--port-file");
     let transfer_key = argument("--transfer-key");
-    let (store, keyring_dir, port_file, transfer_key) = match (store, keyring_dir, port_file, transfer_key) {
+    let (store, keyring_dir, port_file, transfer_key) = match (
+        store,
+        keyring_dir,
+        port_file,
+        transfer_key,
+    ) {
         (Some(store), Some(keyring_dir), Some(port_file), Some(transfer_key)) => {
             (store, keyring_dir, port_file, transfer_key)
         }
         _ => {
-            eprintln!("usage: relay --store DIR --keyring-dir DIR --port-file PATH --transfer-key HEX [--timeout SECONDS]");
+            eprintln!(
+                "usage: relay --store DIR --keyring-dir DIR --port-file PATH --transfer-key HEX [--timeout SECONDS]"
+            );
             std::process::exit(2);
         }
     };
@@ -61,5 +68,7 @@ fn main() {
 
 fn argument(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    args.iter().position(|item| item == name).and_then(|index| args.get(index + 1).cloned())
+    args.iter()
+        .position(|item| item == name)
+        .and_then(|index| args.get(index + 1).cloned())
 }

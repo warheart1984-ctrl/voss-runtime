@@ -75,8 +75,14 @@ fn envelope(runtime: &VossRuntime, request_id: &str) -> String {
         ("session_id", Json::string(&runtime.worker_session)),
         ("principal", Json::string(&runtime.worker_principal)),
         ("action", Json::string("workspace.write")),
-        ("resource", Json::object([("path", Json::string("draft.txt"))])),
-        ("payload", Json::object([("content", Json::string("crash-test"))])),
+        (
+            "resource",
+            Json::object([("path", Json::string("draft.txt"))]),
+        ),
+        (
+            "payload",
+            Json::object([("content", Json::string("crash-test"))]),
+        ),
         ("constraints", Json::empty_object()),
     ]);
     String::from_utf8(canonical_bytes(&value).unwrap_or_default()).unwrap_or_default()

@@ -300,7 +300,9 @@ fn selfcheck() -> Json {
         .map(|(key, _)| key)
         .filter(|key| {
             let upper = key.to_ascii_uppercase();
-            SECRET_FRAGMENTS.iter().any(|fragment| upper.contains(fragment))
+            SECRET_FRAGMENTS
+                .iter()
+                .any(|fragment| upper.contains(fragment))
         })
         .collect::<Vec<_>>();
     names.sort();

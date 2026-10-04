@@ -14,8 +14,8 @@ use crate::approval::{
     APPROVE, ApprovalController, ApprovalError, STATE_DENIED_OR_EXPIRED, STATE_PENDING_APPROVAL,
 };
 use crate::audit::{AuditFields, AuditLog};
-use crate::crashpoint::{self, CAPABILITY_ISSUED, EFFECT_DONE, REQUEST_EXECUTED};
 use crate::canonical::{Json, json_number, new_id, sha256_hex};
+use crate::crashpoint::{self, CAPABILITY_ISSUED, EFFECT_DONE, REQUEST_EXECUTED};
 use crate::policy::{DECISION_ALLOW, DECISION_DENY, DECISION_REQUIRE_APPROVAL, PolicyEngine};
 use crate::protocol::{CanonicalRequest, action_class, approval_binding_digest, bind};
 use crate::tools::{ToolError, ToolRegistry};
@@ -76,9 +76,15 @@ impl BrokerDecision {
     pub fn to_json(&self) -> Json {
         let mut pairs = vec![
             ("decision", Json::string(&self.decision)),
-            ("reason_code", Json::string(coarse_reason_code(&self.reason_code))),
+            (
+                "reason_code",
+                Json::string(coarse_reason_code(&self.reason_code)),
+            ),
             ("policy_version", Json::string(&self.policy_version)),
-            ("approval_request_id", Json::string(&self.approval_request_id)),
+            (
+                "approval_request_id",
+                Json::string(&self.approval_request_id),
+            ),
             ("capability_id", Json::string(&self.capability_id)),
         ];
         if let Some(result) = &self.result {
@@ -105,7 +111,9 @@ pub fn coarse_reason_code(full: &str) -> &'static str {
 pub trait HealthProvider: Send + Sync {
     fn watchdog_health_ok(&self) -> bool;
     fn watchdog_accepts_work(&self, worker_id: &str) -> bool;
-    fn relay_ok(&self) -> bool { true }
+    fn relay_ok(&self) -> bool {
+        true
+    }
 }
 
 struct BrokerState {
@@ -216,7 +224,12 @@ impl Broker {
                 outcome: String::new(),
             };
         }
-        let cap = self.issue(&mut state, request, worker_id, &format!("policy:{}", self.policy.version()));
+        let cap = self.issue(
+            &mut state,
+            request,
+            worker_id,
+            &format!("policy:{}", self.policy.version()),
+        );
         self.use_capability(&mut state, cap, request, worker_id, "")
     }
 
@@ -342,11 +355,15 @@ impl Broker {
                         ..AuditFields::default()
                     },
                 );
-                wal_emit(&self.wal, "capability_revoked", [
-                    ("cap_id", Json::string(cap_id)),
-                    ("request_id", Json::string(request_id)),
-                    ("reason", Json::string(reason)),
-                ]);
+                wal_emit(
+                    &self.wal,
+                    "capability_revoked",
+                    [
+                        ("cap_id", Json::string(cap_id)),
+                        ("request_id", Json::string(request_id)),
+                        ("reason", Json::string(reason)),
+                    ],
+                );
             }
         }
         revoked
@@ -361,7 +378,13 @@ impl Broker {
     }
 
     pub fn capabilities(&self) -> Vec<Capability> {
-        self.state.lock().expect("broker lock").caps.values().cloned().collect()
+        self.state
+            .lock()
+            .expect("broker lock")
+            .caps
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn mark_executed(&self, request_id: &str) {
@@ -505,32 +528,42 @@ impl Broker {
     }
 
     fn store(&self, state: &mut BrokerState, capability: Capability) -> Capability {
-        if self.audit.emit(
-            "capability_issued",
-            AuditFields {
-                worker_id: Some(capability.principal.clone()),
-                session_id: Some(capability.session_id.clone()),
-                request_id: Some(capability.request_id.clone()),
-                request_digest: Some(capability.request_digest.clone()),
-                action: Some(capability.action.clone()),
-                policy_version: Some(capability.policy_version.clone()),
-                capability_id: Some(capability.cap_id.clone()),
-                flow_id: if capability.flow_id.is_empty() {
-                    None
-                } else {
-                    Some(capability.flow_id.clone())
+        if self
+            .audit
+            .emit(
+                "capability_issued",
+                AuditFields {
+                    worker_id: Some(capability.principal.clone()),
+                    session_id: Some(capability.session_id.clone()),
+                    request_id: Some(capability.request_id.clone()),
+                    request_digest: Some(capability.request_digest.clone()),
+                    action: Some(capability.action.clone()),
+                    policy_version: Some(capability.policy_version.clone()),
+                    capability_id: Some(capability.cap_id.clone()),
+                    flow_id: if capability.flow_id.is_empty() {
+                        None
+                    } else {
+                        Some(capability.flow_id.clone())
+                    },
+                    decision: Some("ALLOW".to_string()),
+                    reason_code: Some("policy_allowed".to_string()),
+                    approver_ref: Some(capability.approval_ref.clone()),
+                    ..AuditFields::default()
                 },
-                decision: Some("ALLOW".to_string()),
-                reason_code: Some("policy_allowed".to_string()),
-                approver_ref: Some(capability.approval_ref.clone()),
-                ..AuditFields::default()
-            },
-        ).is_err() {
+            )
+            .is_err()
+        {
             // fail-closed: do not store capability if audit is unavailable
             return capability;
         }
-        state.caps.insert(capability.cap_id.clone(), capability.clone());
-        wal_emit(&self.wal, "capability_issued", capability_record(&capability));
+        state
+            .caps
+            .insert(capability.cap_id.clone(), capability.clone());
+        wal_emit(
+            &self.wal,
+            "capability_issued",
+            capability_record(&capability),
+        );
         crashpoint::maybe_crash(CAPABILITY_ISSUED);
         capability
     }
@@ -563,8 +596,13 @@ impl Broker {
             );
             return BrokerDecision::deny("denied_capability_forged", self.policy.version());
         };
-        if let Some(reason) = validate_capability(&capability, request, worker_id, self.policy.version(), &state.executed)
-        {
+        if let Some(reason) = validate_capability(
+            &capability,
+            request,
+            worker_id,
+            self.policy.version(),
+            &state.executed,
+        ) {
             let digest = request.digest().unwrap_or_default();
             let _ = self.audit.emit(
                 "denied",
@@ -586,36 +624,49 @@ impl Broker {
             return BrokerDecision::deny(reason, self.policy.version());
         }
         {
-            let stored = state.caps.get_mut(&capability.cap_id).expect("capability exists");
+            let stored = state
+                .caps
+                .get_mut(&capability.cap_id)
+                .expect("capability exists");
             stored.used_count += 1;
         }
         state.executed.insert(request.request_id.clone());
-        wal_emit(&self.wal, "capability_used", [
-            ("cap_id", Json::string(&capability.cap_id)),
-            ("request_id", Json::string(&request.request_id)),
-        ]);
-        wal_emit(&self.wal, "request_executed", [
-            ("request_id", Json::string(&request.request_id)),
-        ]);
+        wal_emit(
+            &self.wal,
+            "capability_used",
+            [
+                ("cap_id", Json::string(&capability.cap_id)),
+                ("request_id", Json::string(&request.request_id)),
+            ],
+        );
+        wal_emit(
+            &self.wal,
+            "request_executed",
+            [("request_id", Json::string(&request.request_id))],
+        );
         crashpoint::maybe_crash(REQUEST_EXECUTED);
         let digest = request.digest().unwrap_or_default();
-        if self.audit.emit(
-            "execution_start",
-            fields(
-                self.policy.version(),
-                worker_id,
-                request,
-                &digest,
-                Outcome {
-                    reason: Some("policy_allowed"),
-                    decision: "ALLOW",
-                    flow_id: Some(flow_id),
-                    capability_id: Some(&capability.cap_id),
-                    result: None,
-                    error: None,
-                },
-            ),
-        ).is_err() {
+        if self
+            .audit
+            .emit(
+                "execution_start",
+                fields(
+                    self.policy.version(),
+                    worker_id,
+                    request,
+                    &digest,
+                    Outcome {
+                        reason: Some("policy_allowed"),
+                        decision: "ALLOW",
+                        flow_id: Some(flow_id),
+                        capability_id: Some(&capability.cap_id),
+                        result: None,
+                        error: None,
+                    },
+                ),
+            )
+            .is_err()
+        {
             return BrokerDecision::deny("denied_audit_unavailable", self.policy.version());
         }
         if !self.audit.healthy() || !self.wal.healthy() {
@@ -728,7 +779,11 @@ impl Broker {
     }
 }
 
-fn wal_emit(wal: &AuditLog, event_type: &str, pairs: impl IntoIterator<Item = (&'static str, Json)>) {
+fn wal_emit(
+    wal: &AuditLog,
+    event_type: &str,
+    pairs: impl IntoIterator<Item = (&'static str, Json)>,
+) {
     let _ = wal.emit(
         event_type,
         AuditFields {
@@ -866,7 +921,10 @@ fn fields(
         policy_version: Some(policy_version.to_string()),
         decision: Some(outcome.decision.to_string()),
         reason_code: outcome.reason.map(str::to_string),
-        flow_id: outcome.flow_id.filter(|value| !value.is_empty()).map(str::to_string),
+        flow_id: outcome
+            .flow_id
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         capability_id: outcome.capability_id.map(str::to_string),
         result: outcome.result,
         error: outcome.error.map(str::to_string),
@@ -880,4 +938,3 @@ fn wall_now() -> f64 {
         .map(|duration| duration.as_secs_f64())
         .unwrap_or(0.0)
 }
-

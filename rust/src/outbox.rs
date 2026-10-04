@@ -49,7 +49,10 @@ pub fn sign_outbox_challenge(transfer_key: &[u8], challenge: &str) -> String {
 
 fn outbox_challenge_frame(transfer_key: &[u8], challenge: &str) -> Json {
     Json::object([
-        ("mac", Json::string(sign_outbox_challenge(transfer_key, challenge))),
+        (
+            "mac",
+            Json::string(sign_outbox_challenge(transfer_key, challenge)),
+        ),
         ("challenge", Json::string(challenge)),
         ("type", Json::string("challenge")),
     ])
@@ -111,8 +114,11 @@ impl OutboxServer {
         fs::create_dir_all(&delivered_dir).map_err(|error| error.to_string())?;
         let ledger_path = store_dir.join("outbox-receipts.jsonl");
         let receipts = load_receipts(&ledger_path, &delivered_dir)?;
-        let listener = TcpListener::bind(format!("127.0.0.1:{port}")).map_err(|error| error.to_string())?;
-        listener.set_nonblocking(true).map_err(|error| error.to_string())?;
+        let listener =
+            TcpListener::bind(format!("127.0.0.1:{port}")).map_err(|error| error.to_string())?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
         let inner = Arc::new(ServerInner {
             control_path: store_dir.join("outbox-control.jsonl"),
             ledger_path,
@@ -139,7 +145,11 @@ impl OutboxServer {
     }
 
     pub fn port(&self) -> u16 {
-        self.inner.listener.local_addr().map(|addr| addr.port()).unwrap_or(0)
+        self.inner
+            .listener
+            .local_addr()
+            .map(|addr| addr.port())
+            .unwrap_or(0)
     }
 
     pub fn start(&self) {
@@ -148,7 +158,11 @@ impl OutboxServer {
             return;
         }
         let inner = Arc::clone(&self.inner);
-        write_control(&inner.control_path, "outbox_started", &format!("pid={}", std::process::id()));
+        write_control(
+            &inner.control_path,
+            "outbox_started",
+            &format!("pid={}", std::process::id()),
+        );
         *slot = Some(thread::spawn(move || serve_loop(inner)));
     }
 
@@ -177,7 +191,11 @@ fn dispatch(inner: Arc<ServerInner>, stream: TcpStream) {
         let mut stream = stream;
         prepare(&mut stream, Duration::from_secs(5));
         reply(&mut stream, &Json::object([("type", Json::string("busy"))]));
-        write_control(&inner.control_path, "outbox_busy", "another host is connected");
+        write_control(
+            &inner.control_path,
+            "outbox_busy",
+            "another host is connected",
+        );
         graceful_close(stream);
         return;
     }
@@ -191,7 +209,10 @@ fn dispatch(inner: Arc<ServerInner>, stream: TcpStream) {
 fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStream {
     prepare(&mut stream, Duration::from_secs(120));
     // Speak first with this process's challenge; a valid hello must MAC over it.
-    reply(&mut stream, &outbox_challenge_frame(&inner.transfer_key, &inner.challenge));
+    reply(
+        &mut stream,
+        &outbox_challenge_frame(&inner.transfer_key, &inner.challenge),
+    );
     let hello = match relay::read_frame(&mut stream) {
         Ok(message) => message,
         Err(_) => {
@@ -222,7 +243,11 @@ fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStrea
         store.frame_key = frame_key;
     }
     write_control(&inner.control_path, "outbox_accepted_hello", "host");
-    if !reply_signed(&inner, &mut stream, &Json::object([("type", Json::string("hello_ok"))])) {
+    if !reply_signed(
+        &inner,
+        &mut stream,
+        &Json::object([("type", Json::string("hello_ok"))]),
+    ) {
         return stream;
     }
     while !inner.stop.load(Ordering::SeqCst) {
@@ -231,12 +256,24 @@ fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStrea
             Err(RelayFail::Timeout) => continue,
             Err(RelayFail::Closed(_)) => return stream,
             Err(error) => {
-                write_control(&inner.control_path, "outbox_stream_closed", &clip(&error.to_string()));
+                write_control(
+                    &inner.control_path,
+                    "outbox_stream_closed",
+                    &clip(&error.to_string()),
+                );
                 return stream;
             }
         };
-        if !relay::frame_is_authed(&message, OUTBOX_PROTOCOL, &inner.store.lock().expect("outbox store").frame_key) {
-            write_control(&inner.control_path, "outbox_anomaly", "unauthenticated frame");
+        if !relay::frame_is_authed(
+            &message,
+            OUTBOX_PROTOCOL,
+            &inner.store.lock().expect("outbox store").frame_key,
+        ) {
+            write_control(
+                &inner.control_path,
+                "outbox_anomaly",
+                "unauthenticated frame",
+            );
             return stream;
         }
         let expected = {
@@ -254,7 +291,11 @@ fn handle_connection(inner: Arc<ServerInner>, mut stream: TcpStream) -> TcpStrea
         }
         if message.get("type").and_then(Json::as_str) != Some("deliver") {
             let kind = message.get("type").and_then(Json::as_str);
-            write_control(&inner.control_path, "outbox_anomaly", &format!("unknown frame {kind:?}"));
+            write_control(
+                &inner.control_path,
+                "outbox_anomaly",
+                &format!("unknown frame {kind:?}"),
+            );
             return stream;
         }
         let fields = match check_deliver(&message) {
@@ -309,13 +350,21 @@ fn accept_delivery(inner: &ServerInner, fields: &DeliveryFields) -> Result<(Json
     if let Some(prior) = store.receipts.get(&fields.idempotency_key).cloned() {
         if prior.get("service").and_then(Json::as_str) != Some(fields.service.as_str())
             || prior.get("recipient").and_then(Json::as_str) != Some(fields.recipient.as_str())
-            || prior.get("payload_digest").and_then(Json::as_str) != Some(fields.payload_digest.as_str())
+            || prior.get("payload_digest").and_then(Json::as_str)
+                != Some(fields.payload_digest.as_str())
         {
-            write_control(&inner.control_path, "outbox_idempotency_conflict", &fields.idempotency_key);
+            write_control(
+                &inner.control_path,
+                "outbox_idempotency_conflict",
+                &fields.idempotency_key,
+            );
             return Ok((
                 Json::object([
                     ("delivery_id", Json::string(&fields.delivery_id)),
-                    ("reason", Json::string("idempotency key reused for different request")),
+                    (
+                        "reason",
+                        Json::string("idempotency key reused for different request"),
+                    ),
                     ("status", Json::string("refused")),
                     ("type", Json::string("delivered")),
                 ]),
@@ -327,12 +376,22 @@ fn accept_delivery(inner: &ServerInner, fields: &DeliveryFields) -> Result<(Json
             write_control(&inner.control_path, "outbox_storage_failure", &clip(&error));
             return Ok((uncertain_reply(fields, &prior), false));
         }
-        write_control(&inner.control_path, "outbox_duplicate", &fields.idempotency_key);
+        write_control(
+            &inner.control_path,
+            "outbox_duplicate",
+            &fields.idempotency_key,
+        );
         return Ok((
             Json::object([
-                ("delivered_at", prior.get("delivered_at").cloned().unwrap_or(Json::Null)),
+                (
+                    "delivered_at",
+                    prior.get("delivered_at").cloned().unwrap_or(Json::Null),
+                ),
                 ("delivery_id", Json::string(&fields.delivery_id)),
-                ("receipt_id", Json::string(prior.get("receipt_id").and_then(Json::as_str).unwrap_or(""))),
+                (
+                    "receipt_id",
+                    Json::string(prior.get("receipt_id").and_then(Json::as_str).unwrap_or("")),
+                ),
                 ("status", Json::string("duplicate")),
                 ("type", Json::string("delivered")),
             ]),
@@ -340,7 +399,11 @@ fn accept_delivery(inner: &ServerInner, fields: &DeliveryFields) -> Result<(Json
         ));
     }
     if store.refuse {
-        write_control(&inner.control_path, "outbox_refused", &fields.idempotency_key);
+        write_control(
+            &inner.control_path,
+            "outbox_refused",
+            &fields.idempotency_key,
+        );
         return Ok((
             Json::object([
                 ("delivery_id", Json::string(&fields.delivery_id)),
@@ -370,7 +433,9 @@ fn accept_delivery(inner: &ServerInner, fields: &DeliveryFields) -> Result<(Json
         write_control(&inner.control_path, "outbox_storage_failure", &clip(&error));
         return Err(error);
     }
-    store.receipts.insert(fields.idempotency_key.clone(), record.clone());
+    store
+        .receipts
+        .insert(fields.idempotency_key.clone(), record.clone());
     if let Err(error) = write_delivered(&inner.delivered_dir, &record) {
         store.refuse = true;
         write_control(&inner.control_path, "outbox_storage_failure", &clip(&error));
@@ -389,7 +454,11 @@ fn accept_delivery(inner: &ServerInner, fields: &DeliveryFields) -> Result<(Json
         ("type", Json::string("delivered")),
     ]);
     if inner.drop_ack {
-        write_control(&inner.control_path, "outbox_dropped_ack", &fields.idempotency_key);
+        write_control(
+            &inner.control_path,
+            "outbox_dropped_ack",
+            &fields.idempotency_key,
+        );
         return Ok((ack, true));
     }
     Ok((ack, false))
@@ -397,16 +466,33 @@ fn accept_delivery(inner: &ServerInner, fields: &DeliveryFields) -> Result<(Json
 
 fn uncertain_reply(fields: &DeliveryFields, record: &Json) -> Json {
     Json::object([
-        ("delivered_at", record.get("delivered_at").cloned().unwrap_or(Json::Null)),
+        (
+            "delivered_at",
+            record.get("delivered_at").cloned().unwrap_or(Json::Null),
+        ),
         ("delivery_id", Json::string(&fields.delivery_id)),
-        ("reason", Json::string("delivery recorded, response uncertain")),
-        ("receipt_id", Json::string(record.get("receipt_id").and_then(Json::as_str).unwrap_or(""))),
+        (
+            "reason",
+            Json::string("delivery recorded, response uncertain"),
+        ),
+        (
+            "receipt_id",
+            Json::string(
+                record
+                    .get("receipt_id")
+                    .and_then(Json::as_str)
+                    .unwrap_or(""),
+            ),
+        ),
         ("status", Json::string("uncertain")),
         ("type", Json::string("delivered")),
     ])
 }
 
-fn load_receipts(ledger_path: &Path, delivered_dir: &Path) -> Result<BTreeMap<String, Json>, String> {
+fn load_receipts(
+    ledger_path: &Path,
+    delivered_dir: &Path,
+) -> Result<BTreeMap<String, Json>, String> {
     let text = match fs::read_to_string(ledger_path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
@@ -418,12 +504,19 @@ fn load_receipts(ledger_path: &Path, delivered_dir: &Path) -> Result<BTreeMap<St
         if line.is_empty() {
             return Err(format!("invalid outbox ledger at line {line_number}"));
         }
-        let record = loads_strict(line).map_err(|_| format!("invalid outbox ledger at line {line_number}"))?;
+        let record = loads_strict(line)
+            .map_err(|_| format!("invalid outbox ledger at line {line_number}"))?;
         let Json::Object(_) = &record else {
             return Err(format!("invalid outbox ledger at line {line_number}"));
         };
-        let idem = record.get("idempotency_key").and_then(Json::as_str).unwrap_or("");
-        let receipt_id = record.get("receipt_id").and_then(Json::as_str).unwrap_or("");
+        let idem = record
+            .get("idempotency_key")
+            .and_then(Json::as_str)
+            .unwrap_or("");
+        let receipt_id = record
+            .get("receipt_id")
+            .and_then(Json::as_str)
+            .unwrap_or("");
         if idem.is_empty()
             || receipt_id.is_empty()
             || record.get("status").and_then(Json::as_str) != Some("delivered")
@@ -431,9 +524,17 @@ fn load_receipts(ledger_path: &Path, delivered_dir: &Path) -> Result<BTreeMap<St
             return Err(format!("invalid outbox ledger at line {line_number}"));
         }
         if receipts.contains_key(idem) {
-            return Err(format!("duplicate idempotency key in outbox ledger at line {line_number}"));
+            return Err(format!(
+                "duplicate idempotency key in outbox ledger at line {line_number}"
+            ));
         }
-        for field in ["service", "recipient", "payload_digest", "delivery_id", "delivered_at"] {
+        for field in [
+            "service",
+            "recipient",
+            "payload_digest",
+            "delivery_id",
+            "delivered_at",
+        ] {
             if record.get(field).is_none() {
                 return Err(format!("incomplete outbox ledger at line {line_number}"));
             }
@@ -445,11 +546,16 @@ fn load_receipts(ledger_path: &Path, delivered_dir: &Path) -> Result<BTreeMap<St
 }
 
 fn recover_delivery_file(delivered_dir: &Path, record: &Json) -> Result<(), String> {
-    let receipt_id = record.get("receipt_id").and_then(Json::as_str).unwrap_or("");
+    let receipt_id = record
+        .get("receipt_id")
+        .and_then(Json::as_str)
+        .unwrap_or("");
     let path = delivered_dir.join(format!("{receipt_id}.json"));
     if path.exists() {
-        let text = fs::read_to_string(&path).map_err(|_| "cannot verify outbox effect file".to_string())?;
-        let existing = loads_strict(&text).map_err(|_| "cannot verify outbox effect file".to_string())?;
+        let text = fs::read_to_string(&path)
+            .map_err(|_| "cannot verify outbox effect file".to_string())?;
+        let existing =
+            loads_strict(&text).map_err(|_| "cannot verify outbox effect file".to_string())?;
         if existing != *record {
             return Err("outbox effect disagrees with receipt ledger".to_string());
         }
@@ -461,14 +567,21 @@ fn recover_delivery_file(delivered_dir: &Path, record: &Json) -> Result<(), Stri
 fn append_ledger(path: &Path, record: &Json) -> Result<(), String> {
     let mut bytes = canonical_bytes(record).map_err(|error| error.message().to_string())?;
     bytes.push(b'\n');
-    let mut file = OpenOptions::new().create(true).append(true).open(path).map_err(|error| error.to_string())?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
     file.write_all(&bytes).map_err(|error| error.to_string())?;
     file.sync_all().map_err(|error| error.to_string())?;
     Ok(())
 }
 
 fn write_delivered(delivered_dir: &Path, record: &Json) -> Result<(), String> {
-    let receipt_id = record.get("receipt_id").and_then(Json::as_str).unwrap_or("");
+    let receipt_id = record
+        .get("receipt_id")
+        .and_then(Json::as_str)
+        .unwrap_or("");
     let path = delivered_dir.join(format!("{receipt_id}.json"));
     let temp = PathBuf::from(format!("{}.tmp", path.display()));
     let bytes = canonical_bytes(record).map_err(|error| error.message().to_string())?;
@@ -591,7 +704,12 @@ impl OutboxLink {
         Self::with_timeout(host, port, transfer_key, Duration::from_secs(2))
     }
 
-    pub fn with_timeout(host: impl Into<String>, port: u16, transfer_key: Vec<u8>, timeout: Duration) -> Self {
+    pub fn with_timeout(
+        host: impl Into<String>,
+        port: u16,
+        transfer_key: Vec<u8>,
+        timeout: Duration,
+    ) -> Self {
         Self {
             inner: Arc::new(LinkInner {
                 host: host.into(),
@@ -647,7 +765,14 @@ impl OutboxLink {
         let health = self.health();
         Json::object([
             ("connected", Json::Bool(health.connected)),
-            ("error", if health.error.is_empty() { Json::Null } else { Json::string(health.error) }),
+            (
+                "error",
+                if health.error.is_empty() {
+                    Json::Null
+                } else {
+                    Json::string(health.error)
+                },
+            ),
             ("failed", Json::Bool(health.failed)),
             ("ok", Json::Bool(health.ok)),
         ])
@@ -663,7 +788,9 @@ impl OutboxLink {
     ) -> Result<DeliveryReceipt, OutboxError> {
         let mut state = self.inner.state.lock().expect("outbox link");
         if state.stream.is_none() {
-            return Err(OutboxError::Unavailable("outbox accounting service unreachable".to_string()));
+            return Err(OutboxError::Unavailable(
+                "outbox accounting service unreachable".to_string(),
+            ));
         }
         state.send_seq += 1;
         let send_seq = state.send_seq;
@@ -687,7 +814,9 @@ impl OutboxLink {
         let stream = state.stream.as_mut().expect("stream checked");
         let _ = stream.set_read_timeout(Some(self.inner.timeout));
         let _ = stream.set_write_timeout(Some(self.inner.timeout));
-        let reply = match write_frame(stream, &message).and_then(|_| relay::read_frame(stream).map_err(|error| error.to_string())) {
+        let reply = match write_frame(stream, &message)
+            .and_then(|_| relay::read_frame(stream).map_err(|error| error.to_string()))
+        {
             Ok(reply) => reply,
             Err(error) => {
                 state.connected = false;
@@ -702,10 +831,14 @@ impl OutboxLink {
             }
         };
         if !relay::frame_is_authed(&reply, OUTBOX_PROTOCOL, &state.frame_key) {
-            return Err(OutboxError::Uncertain("reply failed authentication".to_string()));
+            return Err(OutboxError::Uncertain(
+                "reply failed authentication".to_string(),
+            ));
         }
         if reply.get("type").and_then(Json::as_str) != Some("delivered") {
-            return Err(OutboxError::Uncertain(format!("unexpected reply {reply:?}")));
+            return Err(OutboxError::Uncertain(format!(
+                "unexpected reply {reply:?}"
+            )));
         }
         if reply.get("seq").and_then(Json::as_i64) != Some(expect) {
             return Err(OutboxError::Uncertain(format!(
@@ -724,12 +857,18 @@ impl OutboxLink {
         }
         if status == "delivered" || status == "duplicate" {
             return Ok(DeliveryReceipt {
-                receipt_id: reply.get("receipt_id").and_then(Json::as_str).unwrap_or("").to_string(),
+                receipt_id: reply
+                    .get("receipt_id")
+                    .and_then(Json::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 status: status.to_string(),
                 delivered_at: reply.get("delivered_at").and_then(Json::as_f64),
             });
         }
-        Err(OutboxError::Unavailable(format!("outbox refused delivery: {reply:?}")))
+        Err(OutboxError::Unavailable(format!(
+            "outbox refused delivery: {reply:?}"
+        )))
     }
 }
 
@@ -753,14 +892,24 @@ fn run_link(inner: Arc<LinkInner>) {
 fn open_session(inner: &LinkInner, state: &mut LinkState) -> Result<(), String> {
     let address = format!("{}:{}", inner.host, inner.port);
     let mut stream = TcpStream::connect_timeout(
-        &address.parse().map_err(|error: std::net::AddrParseError| error.to_string())?,
+        &address
+            .parse()
+            .map_err(|error: std::net::AddrParseError| error.to_string())?,
         inner.timeout,
     )
     .map_err(|error| error.to_string())?;
-    stream.set_nodelay(true).map_err(|error| error.to_string())?;
-    stream.set_nonblocking(false).map_err(|error| error.to_string())?;
-    stream.set_read_timeout(Some(inner.timeout)).map_err(|error| error.to_string())?;
-    stream.set_write_timeout(Some(inner.timeout)).map_err(|error| error.to_string())?;
+    stream
+        .set_nodelay(true)
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_read_timeout(Some(inner.timeout))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(inner.timeout))
+        .map_err(|error| error.to_string())?;
     let challenge = relay::read_frame(&mut stream).map_err(|error| error.to_string())?;
     if challenge.get("type").and_then(Json::as_str) != Some("challenge") {
         return Err(format!("no challenge: {challenge:?}"));
@@ -768,7 +917,9 @@ fn open_session(inner: &LinkInner, state: &mut LinkState) -> Result<(), String> 
     let Some(challenge_value) = challenge.get("challenge").and_then(Json::as_str) else {
         return Err(format!("no challenge: {challenge:?}"));
     };
-    if challenge.get("mac").and_then(Json::as_str) != Some(&sign_outbox_challenge(&inner.transfer_key, challenge_value)) {
+    if challenge.get("mac").and_then(Json::as_str)
+        != Some(&sign_outbox_challenge(&inner.transfer_key, challenge_value))
+    {
         return Err("challenge failed authentication".to_string());
     }
     let nonce = new_id("ob-");
@@ -780,7 +931,14 @@ fn open_session(inner: &LinkInner, state: &mut LinkState) -> Result<(), String> 
     );
     let hello = Json::object([
         ("challenge", Json::string(challenge_value)),
-        ("mac", Json::string(sign_outbox_hello(&inner.transfer_key, &nonce, challenge_value))),
+        (
+            "mac",
+            Json::string(sign_outbox_hello(
+                &inner.transfer_key,
+                &nonce,
+                challenge_value,
+            )),
+        ),
         ("nonce", Json::string(nonce)),
         ("type", Json::string("hello")),
         ("version", Json::string(OUTBOX_PROTOCOL)),
@@ -801,9 +959,9 @@ fn open_session(inner: &LinkInner, state: &mut LinkState) -> Result<(), String> 
         let _ = stream.shutdown(Shutdown::Both);
         return Err(error);
     }
-        state.send_seq = 0;
-        state.expect_seq = 1;
-        state.frame_key = session_key;
+    state.send_seq = 0;
+    state.expect_seq = 1;
+    state.frame_key = session_key;
     state.stream = Some(stream);
     state.connected = true;
     state.ever_connected = true;
@@ -832,7 +990,9 @@ fn reply(stream: &mut TcpStream, message: &Json) {
 
 fn write_frame(stream: &mut TcpStream, message: &Json) -> Result<(), String> {
     let bytes = relay::frame(message).map_err(|error| error.to_string())?;
-    stream.write_all(&bytes).map_err(|error| error.to_string())?;
+    stream
+        .write_all(&bytes)
+        .map_err(|error| error.to_string())?;
     stream.flush().map_err(|error| error.to_string())?;
     Ok(())
 }
