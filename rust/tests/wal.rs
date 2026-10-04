@@ -150,10 +150,16 @@ fn tamper_detected() {
     }
     lines[1] = String::from_utf8(canonical_bytes(&record).unwrap()).unwrap();
     fs::write(&path, lines.join("\n") + "\n").unwrap();
-    let reopened = AuditLog::open_chain(&path, keys, WAL_SCHEMA, &wal_genesis().unwrap()).unwrap();
-    assert!(!reopened.verify_integrity());
-    assert!(reopened.healthy());
-    reopened.close();
+    let error = match AuditLog::open_chain(&path, keys, WAL_SCHEMA, &wal_genesis().unwrap()) {
+        Ok(_) => panic!("a tampered log must refuse to open"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .message()
+            .contains("audit log integrity verification failed"),
+        "{error}"
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -252,7 +258,6 @@ fn tampered_wal_fails_closed() {
     );
     let response = runtime.handle_envelope(&proposal);
     assert_eq!(text(&response, "decision"), "REQUIRE_APPROVAL");
-    let flow_id = text(&response, "approval_request_id");
     runtime.close();
 
     let path = root.join("wal.jsonl");
@@ -272,25 +277,23 @@ fn tampered_wal_fails_closed() {
     lines[last] = String::from_utf8(canonical_bytes(&record).unwrap()).unwrap();
     fs::write(&path, lines.join("\n") + "\n").unwrap();
 
-    let restarted = open_runtime(&root);
-    let health = restarted.health_report();
-    assert!(flag(&health, "wal_healthy"));
-    assert!(!flag(&health, "recovery_ok"));
-    assert!(!flag(&health, "worker_accepts_work"));
-    let probe = envelope(
-        &restarted,
-        "req-probe",
-        "workspace.write",
-        Json::object([("path", Json::string("draft.txt"))]),
-        Json::object([("content", Json::string("nope"))]),
-        Json::empty_object(),
+    let keys = KeyRing::load_or_create(&root).unwrap();
+    let error = match VossRuntime::open(
+        root.join("workspace"),
+        root.join("outbox"),
+        root.join("audit.jsonl"),
+        keys,
+        None,
+    ) {
+        Ok(_) => panic!("a tampered WAL must refuse to open"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .message()
+            .contains("audit log integrity verification failed"),
+        "{error}"
     );
-    let denied = restarted.handle_envelope(&probe);
-    assert_eq!(text(&denied, "decision"), "DENY");
-    assert_eq!(text(&denied, "reason_code"), "denied_worker_suspended");
-    let decided = restarted.resolve_approval(&flow_id, "APPROVE", "test-human");
-    assert_eq!(text(&decided, "decision"), "DENY");
-    restarted.close();
     assert!(!root.join("workspace").join("draft.txt").exists());
     let _ = fs::remove_dir_all(root);
 }
