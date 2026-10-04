@@ -32,8 +32,14 @@ fn envelope(runtime: &VossRuntime, request_id: &str) -> String {
         ("session_id", Json::string(&runtime.worker_session)),
         ("principal", Json::string(&runtime.worker_principal)),
         ("action", Json::string("workspace.write")),
-        ("resource", Json::object([("path", Json::string("draft.txt"))])),
-        ("payload", Json::object([("content", Json::string("crash-test"))])),
+        (
+            "resource",
+            Json::object([("path", Json::string("draft.txt"))]),
+        ),
+        (
+            "payload",
+            Json::object([("content", Json::string("crash-test"))]),
+        ),
         ("constraints", Json::empty_object()),
     ]);
     String::from_utf8(canonical_bytes(&value).unwrap()).unwrap()
@@ -71,8 +77,14 @@ fn wal_records(root: &Path) -> Vec<Json> {
 
 fn assert_clean_recovery(runtime: &VossRuntime) {
     let health = runtime.health_report();
-    assert_eq!(health.get("wal_healthy").and_then(Json::as_bool), Some(true));
-    assert_eq!(health.get("recovery_ok").and_then(Json::as_bool), Some(true));
+    assert_eq!(
+        health.get("wal_healthy").and_then(Json::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        health.get("recovery_ok").and_then(Json::as_bool),
+        Some(true)
+    );
     let audit = runtime.audit_text();
     assert!(audit.contains("\"event_type\":\"recovery\""));
     assert!(!audit.contains("recovery_failed"));
@@ -82,8 +94,7 @@ fn assert_clean_recovery(runtime: &VossRuntime) {
 fn runtime_audit_ok(runtime: &VossRuntime) -> bool {
     !runtime.audit_text().is_empty() && {
         let health = runtime.health_report();
-        health.get("audit_healthy").and_then(Json::as_bool) == Some(true)
-            && audit_verifies(runtime)
+        health.get("audit_healthy").and_then(Json::as_bool) == Some(true) && audit_verifies(runtime)
     }
 }
 
@@ -93,7 +104,11 @@ fn audit_verifies(runtime: &VossRuntime) -> bool {
 }
 
 fn text(value: &Json, key: &str) -> String {
-    value.get(key).and_then(Json::as_str).unwrap_or("").to_string()
+    value
+        .get(key)
+        .and_then(Json::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 fn draft(runtime: &VossRuntime) -> std::path::PathBuf {
@@ -114,7 +129,11 @@ fn crash_before_wal_flow_request_loses_only_that_flow() {
     assert!(flows.is_empty());
     let response = runtime.handle_envelope(&envelope(&runtime, "crash-flow_request_prewal"));
     assert_eq!(text(&response, "decision"), "REQUIRE_APPROVAL");
-    let out = runtime.resolve_approval(&text(&response, "approval_request_id"), "APPROVE", "crash-test");
+    let out = runtime.resolve_approval(
+        &text(&response, "approval_request_id"),
+        "APPROVE",
+        "crash-test",
+    );
     assert_eq!(text(&out, "decision"), "ALLOW");
     assert_eq!(fs::read_to_string(draft(&runtime)).unwrap(), "crash-test");
     runtime.close();
@@ -137,13 +156,20 @@ fn crash_after_flow_request_restores_pending_approval() {
         .collect();
     assert_eq!(flows.len(), 1);
     let flow_id = text(&flows[0], "flow_id");
-    assert_eq!(runtime.approval_state(&flow_id).as_deref(), Some("PENDING_APPROVAL"));
+    assert_eq!(
+        runtime.approval_state(&flow_id).as_deref(),
+        Some("PENDING_APPROVAL")
+    );
     let out = runtime.resolve_approval(&flow_id, "APPROVE", "crash-test");
     assert_eq!(text(&out, "decision"), "ALLOW");
     assert_eq!(fs::read_to_string(draft(&runtime)).unwrap(), "crash-test");
     let again = runtime.handle_envelope(&envelope(&runtime, "crash-flow_request"));
     assert_eq!(text(&again, "decision"), "REQUIRE_APPROVAL");
-    let decided = runtime.resolve_approval(&text(&again, "approval_request_id"), "APPROVE", "crash-test");
+    let decided = runtime.resolve_approval(
+        &text(&again, "approval_request_id"),
+        "APPROVE",
+        "crash-test",
+    );
     assert_eq!(text(&decided, "reason_code"), "denied_replay");
     runtime.close();
     let _ = fs::remove_dir_all(root);
@@ -164,19 +190,28 @@ fn crash_after_approval_grants_nothing_more() {
         })
         .collect();
     let flow_id = text(&flows[0], "flow_id");
-    assert_eq!(runtime.approval_state(&flow_id).as_deref(), Some("AUTHORIZED"));
+    assert_eq!(
+        runtime.approval_state(&flow_id).as_deref(),
+        Some("AUTHORIZED")
+    );
     assert!(runtime.capabilities().is_empty());
     let denied = runtime.resolve_approval(&flow_id, "APPROVE", "crash-test");
     assert_eq!(text(&denied, "decision"), "DENY");
     assert!(!draft(&runtime).exists());
     let response = runtime.handle_envelope(&envelope(&runtime, "crash-flow_resolution"));
     assert_eq!(text(&response, "decision"), "REQUIRE_APPROVAL");
-    let out = runtime.resolve_approval(&text(&response, "approval_request_id"), "APPROVE", "crash-test");
+    let out = runtime.resolve_approval(
+        &text(&response, "approval_request_id"),
+        "APPROVE",
+        "crash-test",
+    );
     assert_eq!(text(&out, "decision"), "ALLOW");
     assert_eq!(fs::read_to_string(draft(&runtime)).unwrap(), "crash-test");
     let executed = wal_records(&root)
         .into_iter()
-        .filter(|record| record.get("event_type").and_then(Json::as_str) == Some("request_executed"))
+        .filter(|record| {
+            record.get("event_type").and_then(Json::as_str) == Some("request_executed")
+        })
         .count();
     assert_eq!(executed, 1);
     runtime.close();
@@ -195,12 +230,18 @@ fn crash_after_capability_issued_effect_runs_once() {
     assert!(!caps[0].is_used());
     let response = runtime.handle_envelope(&envelope(&runtime, "crash-capability_issued"));
     assert_eq!(text(&response, "decision"), "REQUIRE_APPROVAL");
-    let out = runtime.resolve_approval(&text(&response, "approval_request_id"), "APPROVE", "crash-test");
+    let out = runtime.resolve_approval(
+        &text(&response, "approval_request_id"),
+        "APPROVE",
+        "crash-test",
+    );
     assert_eq!(text(&out, "decision"), "ALLOW");
     assert_eq!(fs::read_to_string(draft(&runtime)).unwrap(), "crash-test");
     let executed = wal_records(&root)
         .into_iter()
-        .filter(|record| record.get("event_type").and_then(Json::as_str) == Some("request_executed"))
+        .filter(|record| {
+            record.get("event_type").and_then(Json::as_str) == Some("request_executed")
+        })
         .count();
     assert_eq!(executed, 1);
     runtime.close();
@@ -217,7 +258,11 @@ fn crash_before_effect_blocks_replay() {
     assert!(!draft(&runtime).exists());
     let response = runtime.handle_envelope(&envelope(&runtime, "crash-request_executed"));
     assert_eq!(text(&response, "decision"), "REQUIRE_APPROVAL");
-    let decided = runtime.resolve_approval(&text(&response, "approval_request_id"), "APPROVE", "crash-test");
+    let decided = runtime.resolve_approval(
+        &text(&response, "approval_request_id"),
+        "APPROVE",
+        "crash-test",
+    );
     assert_eq!(text(&decided, "reason_code"), "denied_replay");
     assert!(!draft(&runtime).exists());
     runtime.close();
@@ -233,16 +278,28 @@ fn crash_after_effect_never_double_executes() {
     assert_clean_recovery(&runtime);
     assert!(draft(&runtime).exists());
     let audit = runtime.audit_text();
-    assert_eq!(audit.matches("\"event_type\":\"execution_start\"").count(), 1);
-    assert_eq!(audit.matches("\"event_type\":\"execution_result\"").count(), 0);
+    assert_eq!(
+        audit.matches("\"event_type\":\"execution_start\"").count(),
+        1
+    );
+    assert_eq!(
+        audit.matches("\"event_type\":\"execution_result\"").count(),
+        0
+    );
     let response = runtime.handle_envelope(&envelope(&runtime, "crash-effect_done"));
     assert_eq!(text(&response, "decision"), "REQUIRE_APPROVAL");
-    let decided = runtime.resolve_approval(&text(&response, "approval_request_id"), "APPROVE", "crash-test");
+    let decided = runtime.resolve_approval(
+        &text(&response, "approval_request_id"),
+        "APPROVE",
+        "crash-test",
+    );
     assert_eq!(text(&decided, "reason_code"), "denied_replay");
     assert_eq!(fs::read_to_string(draft(&runtime)).unwrap(), "crash-test");
     let executed = wal_records(&root)
         .into_iter()
-        .filter(|record| record.get("event_type").and_then(Json::as_str) == Some("request_executed"))
+        .filter(|record| {
+            record.get("event_type").and_then(Json::as_str) == Some("request_executed")
+        })
         .count();
     assert_eq!(executed, 1);
     runtime.close();
@@ -255,7 +312,8 @@ fn incomplete_final_record_is_trimmed() {
     fs::create_dir_all(&root).unwrap();
     let path = root.join("wal.jsonl");
     let keys = KeyRing::generate();
-    let wal = AuditLog::open_chain(&path, keys.clone(), WAL_SCHEMA, &wal_genesis().unwrap()).unwrap();
+    let wal =
+        AuditLog::open_chain(&path, keys.clone(), WAL_SCHEMA, &wal_genesis().unwrap()).unwrap();
     wal.emit(
         "flow_request",
         AuditFields {

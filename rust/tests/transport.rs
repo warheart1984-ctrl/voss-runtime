@@ -33,7 +33,11 @@ fn accepts_work(runtime: &VossRuntime) -> bool {
 fn happy_path_realtime_worker() {
     let root = std::env::temp_dir().join(format!("voss-transport-{}", voss::new_id("")));
     let runtime = runtime_in(&root);
-    fs::write(runtime.workspace_root.join("notes.txt"), "hello from the trusted host\n").unwrap();
+    fs::write(
+        runtime.workspace_root.join("notes.txt"),
+        "hello from the trusted host\n",
+    )
+    .unwrap();
     let mut child = runtime.spawn_worker().expect("handshake");
     assert_eq!(
         runtime
@@ -50,7 +54,10 @@ fn happy_path_realtime_worker() {
     assert_eq!(envelopes.len(), 1);
     let text = String::from_utf8(canonical_bytes(&envelopes[0]).unwrap()).unwrap();
     let response = runtime.handle_envelope(&text);
-    assert_eq!(response.get("decision").and_then(Json::as_str), Some("ALLOW"));
+    assert_eq!(
+        response.get("decision").and_then(Json::as_str),
+        Some("ALLOW")
+    );
     assert!(
         response
             .get("result")
@@ -94,7 +101,11 @@ fn boundary_attacks_are_contained() {
             .spawn_worker_with(Path::new(&evil), &[("VOSS_EVIL_MODE", mode)])
             .unwrap_or_else(|error| panic!("{mode} spawn: {}", error.message()));
         let error = runtime.worker_propose("propose:read").expect_err(mode);
-        assert!(error.message().contains(reason), "{mode}: {}", error.message());
+        assert!(
+            error.message().contains(reason),
+            "{mode}: {}",
+            error.message()
+        );
         assert!(!accepts_work(&runtime), "{mode}: worker must be suspended");
         assert!(runtime.audit_text().contains(reason), "{mode}");
         assert!(runtime.audit_text().contains("transport_denied"), "{mode}");
@@ -116,7 +127,11 @@ fn forged_handshake_blocks_spawn() {
             &[("VOSS_EVIL_MODE", "handshake-forged-mac")],
         )
         .unwrap_err();
-    assert!(error.message().contains("denied_channel_auth"), "{}", error.message());
+    assert!(
+        error.message().contains("denied_channel_auth"),
+        "{}",
+        error.message()
+    );
     assert!(!accepts_work(&runtime));
     assert!(runtime.audit_text().contains("denied_channel_auth"));
     runtime.close();

@@ -92,7 +92,10 @@ fn run() -> i32 {
             ("payload", payload),
             ("principal", Json::string(principal)),
             ("request_id", Json::string(new_id("req-"))),
-            ("resource", Json::object([("path", Json::string("notes.txt"))])),
+            (
+                "resource",
+                Json::object([("path", Json::string("notes.txt"))]),
+            ),
             ("session_id", Json::string(session_id)),
             ("version", Json::string("1")),
         ])];

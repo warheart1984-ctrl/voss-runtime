@@ -107,7 +107,9 @@ impl AuditLog {
             .create(true)
             .append(true)
             .open(&path)
-            .map_err(|error| AuditUnavailableError::new(format!("cannot open audit log: {error}")))?;
+            .map_err(|error| {
+                AuditUnavailableError::new(format!("cannot open audit log: {error}"))
+            })?;
         let audit = Self {
             path: path.clone(),
             keyring: keyring.clone(),
@@ -120,7 +122,10 @@ impl AuditLog {
             }),
         };
         if !audit.verify_integrity() {
-            return Err(AuditUnavailableError::new(format!("audit log integrity verification failed for {}", path.display())));
+            return Err(AuditUnavailableError::new(format!(
+                "audit log integrity verification failed for {}",
+                path.display()
+            )));
         }
         Ok(audit)
     }
@@ -130,10 +135,17 @@ impl AuditLog {
     }
 
     pub fn healthy(&self) -> bool {
-        self.state.lock().map(|state| !state.closed).unwrap_or(false)
+        self.state
+            .lock()
+            .map(|state| !state.closed)
+            .unwrap_or(false)
     }
 
-    pub fn emit(&self, event_type: &str, fields: AuditFields) -> Result<Json, AuditUnavailableError> {
+    pub fn emit(
+        &self,
+        event_type: &str,
+        fields: AuditFields,
+    ) -> Result<Json, AuditUnavailableError> {
         let mut payload = Json::object([
             ("schema", Json::string(&self.schema)),
             ("event_id", Json::string(new_id("evt-"))),
@@ -172,9 +184,8 @@ impl AuditLog {
         let mut mac_input = previous.clone().into_bytes();
         mac_input.extend_from_slice(&payload_bytes);
         let mac = self.keyring.mac_audit(&mac_input);
-        let record_text = String::from_utf8(payload_bytes.clone()).map_err(|error| {
-            AuditUnavailableError::new(error.to_string())
-        })?;
+        let record_text = String::from_utf8(payload_bytes.clone())
+            .map_err(|error| AuditUnavailableError::new(error.to_string()))?;
         let chain_hash = sha256_hex(&Json::object([
             ("prev", Json::string(&previous)),
             ("record", Json::string(record_text)),
@@ -190,11 +201,15 @@ impl AuditLog {
         encoded.push(b'\n');
         if let Err(e) = state.file.write_all(&encoded) {
             state.closed = true;
-            return Err(AuditUnavailableError::new(format!("cannot append audit record: {e}")));
+            return Err(AuditUnavailableError::new(format!(
+                "cannot append audit record: {e}"
+            )));
         }
         if let Err(e) = state.file.flush() {
             state.closed = true;
-            return Err(AuditUnavailableError::new(format!("cannot flush audit record: {e}")));
+            return Err(AuditUnavailableError::new(format!(
+                "cannot flush audit record: {e}"
+            )));
         }
         state.last_hash = chain_hash;
         Ok(line)
@@ -326,8 +341,15 @@ fn split_keepends(raw: &[u8]) -> Vec<&[u8]> {
 }
 
 fn trim_ascii(bytes: &[u8]) -> &[u8] {
-    let start = bytes.iter().position(|byte| !byte.is_ascii_whitespace()).unwrap_or(bytes.len());
-    let end = bytes.iter().rposition(|byte| !byte.is_ascii_whitespace()).map(|index| index + 1).unwrap_or(start);
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|index| index + 1)
+        .unwrap_or(start);
     &bytes[start..end]
 }
 
@@ -336,7 +358,10 @@ fn scan_tail(path: &Path, genesis: &str) -> Result<String, AuditUnavailableError
         return Ok(genesis.to_string());
     }
     let file = File::open(path).map_err(|error| {
-        AuditUnavailableError::new(format!("cannot read audit tail at {}: {error}", path.display()))
+        AuditUnavailableError::new(format!(
+            "cannot read audit tail at {}: {error}",
+            path.display()
+        ))
     })?;
     let mut digest = genesis.to_string();
     for line in BufReader::new(file).lines() {

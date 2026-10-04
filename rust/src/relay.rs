@@ -91,7 +91,12 @@ pub fn challenge_frame(transfer_key: &[u8], challenge: &str) -> Json {
     ])
 }
 
-pub fn frame_signed(protocol: &str, transfer_key: &[u8], seq: i64, message: &Json) -> Result<Json, String> {
+pub fn frame_signed(
+    protocol: &str,
+    transfer_key: &[u8],
+    seq: i64,
+    message: &Json,
+) -> Result<Json, String> {
     let body = insert_field(message, "seq", Json::Int(seq))?;
     let mac = frame_mac(protocol, transfer_key, seq, &body)?;
     insert_field(&body, "mac", Json::string(mac))
@@ -99,7 +104,12 @@ pub fn frame_signed(protocol: &str, transfer_key: &[u8], seq: i64, message: &Jso
 
 /// Derive a connection-scoped frame key from the authenticated challenge and hello nonce.
 /// Length-prefixing keeps the domain-separated input unambiguous across languages.
-pub fn derive_session_key(protocol: &str, transfer_key: &[u8], challenge: &str, nonce: &str) -> Vec<u8> {
+pub fn derive_session_key(
+    protocol: &str,
+    transfer_key: &[u8],
+    challenge: &str,
+    nonce: &str,
+) -> Vec<u8> {
     let fields = [
         b"voss.session-key.v1".as_slice(),
         protocol.as_bytes(),
@@ -155,7 +165,8 @@ fn insert_field(message: &Json, key: &str, value: Json) -> Result<Json, String> 
 }
 
 pub fn frame(message: &Json) -> Result<Vec<u8>, RelayFail> {
-    let body = canonical_bytes(message).map_err(|error| RelayFail::Violation(error.message().to_string()))?;
+    let body = canonical_bytes(message)
+        .map_err(|error| RelayFail::Violation(error.message().to_string()))?;
     if body.len() > MAX_FRAME {
         return Err(RelayFail::Violation("oversize_frame".to_string()));
     }
@@ -173,8 +184,10 @@ pub fn read_frame(stream: &mut TcpStream) -> Result<Json, RelayFail> {
     }
     let mut body = vec![0u8; length];
     read_exact(stream, &mut body)?;
-    let text = String::from_utf8(body).map_err(|error| RelayFail::Violation(format!("malformed_frame:{error}")))?;
-    let value = loads_strict(&text).map_err(|error| RelayFail::Violation(format!("malformed_frame:{}", error.message())))?;
+    let text = String::from_utf8(body)
+        .map_err(|error| RelayFail::Violation(format!("malformed_frame:{error}")))?;
+    let value = loads_strict(&text)
+        .map_err(|error| RelayFail::Violation(format!("malformed_frame:{}", error.message())))?;
     if !matches!(value, Json::Object(_)) {
         return Err(RelayFail::Violation("malformed_frame".to_string()));
     }
@@ -202,11 +215,11 @@ struct ServerInner {
     // rejects replays within one process lifetime.
     challenge: String,
     timeout: Duration,
-        stop: AtomicBool,
-        active: AtomicBool,
-        state: Mutex<ServerState>,
-        listener: TcpListener,
-    }
+    stop: AtomicBool,
+    active: AtomicBool,
+    state: Mutex<ServerState>,
+    listener: TcpListener,
+}
 
 pub struct AuditRelayServer {
     inner: Arc<ServerInner>,
@@ -221,7 +234,9 @@ impl AuditRelayServer {
         timeout: Duration,
     ) -> Result<Self, RelayFail> {
         if transfer_key.len() < 16 {
-            return Err(RelayFail::Io("transfer key must be at least 16 bytes".to_string()));
+            return Err(RelayFail::Io(
+                "transfer key must be at least 16 bytes".to_string(),
+            ));
         }
         let store_dir = store_dir.as_ref();
         fs::create_dir_all(store_dir).map_err(|error| RelayFail::Io(error.to_string()))?;
@@ -237,8 +252,11 @@ impl AuditRelayServer {
             seen_nonces: HashSet::new(),
         };
         load_store(&store_path, &mut state, &keyring);
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| RelayFail::Io(error.to_string()))?;
-        listener.set_nonblocking(true).map_err(|error| RelayFail::Io(error.to_string()))?;
+        let listener =
+            TcpListener::bind("127.0.0.1:0").map_err(|error| RelayFail::Io(error.to_string()))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| RelayFail::Io(error.to_string()))?;
         Ok(Self {
             inner: Arc::new(ServerInner {
                 store_path,
@@ -257,7 +275,11 @@ impl AuditRelayServer {
     }
 
     pub fn port(&self) -> u16 {
-        self.inner.listener.local_addr().map(|addr| addr.port()).unwrap_or(0)
+        self.inner
+            .listener
+            .local_addr()
+            .map(|addr| addr.port())
+            .unwrap_or(0)
     }
 
     pub fn compromised(&self) -> bool {
@@ -296,10 +318,12 @@ fn serve_loop(inner: Arc<ServerInner>) {
 fn dispatch(inner: &ServerInner, mut stream: TcpStream) {
     let _ = stream.set_nodelay(true);
     if inner.active.swap(true, Ordering::SeqCst) {
-        reply(&mut stream, &Json::object([
-            ("type", Json::string("busy")),
-        ]));
-        write_control(&inner.control_path, "relay_busy", "another host is connected");
+        reply(&mut stream, &Json::object([("type", Json::string("busy"))]));
+        write_control(
+            &inner.control_path,
+            "relay_busy",
+            "another host is connected",
+        );
         return;
     }
     handle_connection(inner, stream);
@@ -311,12 +335,18 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(inner.timeout));
     let _ = stream.set_write_timeout(Some(inner.timeout));
     // Speak first with this process's challenge; a valid hello must MAC over it.
-    reply(&mut stream, &challenge_frame(&inner.transfer_key, &inner.challenge));
+    reply(
+        &mut stream,
+        &challenge_frame(&inner.transfer_key, &inner.challenge),
+    );
     if inner.state.lock().expect("relay state").compromised {
-        reply(&mut stream, &Json::object([
-            ("type", Json::string("refused")),
-            ("reason", Json::string("relay_compromised")),
-        ]));
+        reply(
+            &mut stream,
+            &Json::object([
+                ("type", Json::string("refused")),
+                ("reason", Json::string("relay_compromised")),
+            ]),
+        );
         graceful_close(stream);
         return;
     }
@@ -350,20 +380,38 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
                 if !state.stale {
                     state.stale = true;
                     drop(state);
-                    write_control(&inner.control_path, "relay_stale", "no records within timeout");
+                    write_control(
+                        &inner.control_path,
+                        "relay_stale",
+                        "no records within timeout",
+                    );
                 }
                 if idle >= IDLE_CLOSE_AFTER {
-                    write_control(&inner.control_path, "relay_idle_closed", "connection closed after idle timeout");
+                    write_control(
+                        &inner.control_path,
+                        "relay_idle_closed",
+                        "connection closed after idle timeout",
+                    );
                     break;
                 }
                 continue;
             }
             Err(RelayFail::Closed(_)) => {
-                write_control(&inner.control_path, "relay_stream_closed", "host stream ended");
+                write_control(
+                    &inner.control_path,
+                    "relay_stream_closed",
+                    "host stream ended",
+                );
                 break;
             }
             Err(error) => {
-                violate_session(inner, &mut stream, &error.violation().to_string(), session_key.as_deref(), &mut reply_seq);
+                violate_session(
+                    inner,
+                    &mut stream,
+                    &error.violation().to_string(),
+                    session_key.as_deref(),
+                    &mut reply_seq,
+                );
                 break;
             }
         };
@@ -373,16 +421,23 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
             if state.stale {
                 state.stale = false;
                 drop(state);
-                write_control(&inner.control_path, "relay_recovered", "records resumed after idle");
+                write_control(
+                    &inner.control_path,
+                    "relay_recovered",
+                    "records resumed after idle",
+                );
             }
         }
         if phase == "hello" {
             if let Some(reason) = claim_hello(inner, &message) {
                 write_control(&inner.control_path, "relay_denied_hello", reason);
-                reply(&mut stream, &Json::object([
-                    ("type", Json::string("violation")),
-                    ("reason", Json::string("denied_hello_auth")),
-                ]));
+                reply(
+                    &mut stream,
+                    &Json::object([
+                        ("type", Json::string("violation")),
+                        ("reason", Json::string("denied_hello_auth")),
+                    ]),
+                );
                 break;
             }
             let nonce = message.get("nonce").and_then(Json::as_str).unwrap_or("");
@@ -392,25 +447,56 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
                 &inner.challenge,
                 nonce,
             ));
-            write_control(&inner.control_path, "relay_accepted_hello", "authenticated host connected");
+            write_control(
+                &inner.control_path,
+                "relay_accepted_hello",
+                "authenticated host connected",
+            );
             reply_seq += 1;
-            let hello_ok = frame_signed(RELAY_PROTOCOL, session_key.as_deref().unwrap_or(&[]), reply_seq, &Json::object([
-                ("type", Json::string("hello_ok")),
-                ("nonce", Json::string(nonce)),
-            ])).unwrap_or(Json::Null);
+            let hello_ok = frame_signed(
+                RELAY_PROTOCOL,
+                session_key.as_deref().unwrap_or(&[]),
+                reply_seq,
+                &Json::object([
+                    ("type", Json::string("hello_ok")),
+                    ("nonce", Json::string(nonce)),
+                ]),
+            )
+            .unwrap_or(Json::Null);
             reply(&mut stream, &hello_ok);
             phase = "stream_begin";
         } else if phase == "stream_begin" {
             if message.get("type").and_then(Json::as_str) != Some("stream_begin") {
-                violate_session(inner, &mut stream, "expected_stream_begin", session_key.as_deref(), &mut reply_seq);
+                violate_session(
+                    inner,
+                    &mut stream,
+                    "expected_stream_begin",
+                    session_key.as_deref(),
+                    &mut reply_seq,
+                );
                 break;
             }
-            if !session_key.as_deref().is_some_and(|key| frame_is_authed(&message, RELAY_PROTOCOL, key)) {
-                violate_session(inner, &mut stream, "stream_begin_auth", session_key.as_deref(), &mut reply_seq);
+            if !session_key
+                .as_deref()
+                .is_some_and(|key| frame_is_authed(&message, RELAY_PROTOCOL, key))
+            {
+                violate_session(
+                    inner,
+                    &mut stream,
+                    "stream_begin_auth",
+                    session_key.as_deref(),
+                    &mut reply_seq,
+                );
                 break;
             }
             if json_i64(message.get("seq")) != Some(1) {
-                violate_session(inner, &mut stream, "sequence_gap expected 1", session_key.as_deref(), &mut reply_seq);
+                violate_session(
+                    inner,
+                    &mut stream,
+                    "sequence_gap expected 1",
+                    session_key.as_deref(),
+                    &mut reply_seq,
+                );
                 break;
             }
             let state = inner.state.lock().expect("relay state");
@@ -421,24 +507,54 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
             ]);
             drop(state);
             reply_seq += 1;
-            let signed_ready = frame_signed(RELAY_PROTOCOL, session_key.as_deref().unwrap_or(&[]), reply_seq, &ready).unwrap_or(Json::Null);
+            let signed_ready = frame_signed(
+                RELAY_PROTOCOL,
+                session_key.as_deref().unwrap_or(&[]),
+                reply_seq,
+                &ready,
+            )
+            .unwrap_or(Json::Null);
             reply(&mut stream, &signed_ready);
             expected_seq = 1;
             phase = "records";
         } else {
-            if !session_key.as_deref().is_some_and(|key| frame_is_authed(&message, RELAY_PROTOCOL, key)) {
-                violate_session(inner, &mut stream, "record_auth", session_key.as_deref(), &mut reply_seq);
+            if !session_key
+                .as_deref()
+                .is_some_and(|key| frame_is_authed(&message, RELAY_PROTOCOL, key))
+            {
+                violate_session(
+                    inner,
+                    &mut stream,
+                    "record_auth",
+                    session_key.as_deref(),
+                    &mut reply_seq,
+                );
                 break;
             }
             expected_seq += 1;
             let got = json_i64(message.get("seq"));
             if got != Some(expected_seq) {
-                let shown = got.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string());
-                violate_session(inner, &mut stream, &format!("sequence_gap expected {expected_seq} got {shown}"), session_key.as_deref(), &mut reply_seq);
+                let shown = got
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "null".to_string());
+                violate_session(
+                    inner,
+                    &mut stream,
+                    &format!("sequence_gap expected {expected_seq} got {shown}"),
+                    session_key.as_deref(),
+                    &mut reply_seq,
+                );
                 break;
             }
             let next_reply_seq = reply_seq + 1;
-            if !ingest_record(inner, &mut stream, &message, session_key.as_deref().unwrap_or(&[]), next_reply_seq, &mut reply_seq) {
+            if !ingest_record(
+                inner,
+                &mut stream,
+                &message,
+                session_key.as_deref().unwrap_or(&[]),
+                next_reply_seq,
+                &mut reply_seq,
+            ) {
                 break;
             }
             reply_seq = next_reply_seq;
@@ -447,13 +563,40 @@ fn handle_connection(inner: &ServerInner, mut stream: TcpStream) {
     graceful_close(stream);
 }
 
-fn ingest_record(inner: &ServerInner, stream: &mut TcpStream, message: &Json, frame_key: &[u8], reply_seq: i64, next_reply_seq: &mut i64) -> bool {
-    let Some(record) = message.get("record").filter(|value| matches!(value, Json::Object(_))).cloned() else {
-        violate_session(inner, stream, "record_missing_payload", Some(frame_key), next_reply_seq);
+fn ingest_record(
+    inner: &ServerInner,
+    stream: &mut TcpStream,
+    message: &Json,
+    frame_key: &[u8],
+    reply_seq: i64,
+    next_reply_seq: &mut i64,
+) -> bool {
+    let Some(record) = message
+        .get("record")
+        .filter(|value| matches!(value, Json::Object(_)))
+        .cloned()
+    else {
+        violate_session(
+            inner,
+            stream,
+            "record_missing_payload",
+            Some(frame_key),
+            next_reply_seq,
+        );
         return false;
     };
-    let Some(event_id) = record.get("event_id").and_then(Json::as_str).map(str::to_string) else {
-        violate_session(inner, stream, "record_missing_id", Some(frame_key), next_reply_seq);
+    let Some(event_id) = record
+        .get("event_id")
+        .and_then(Json::as_str)
+        .map(str::to_string)
+    else {
+        violate_session(
+            inner,
+            stream,
+            "record_missing_id",
+            Some(frame_key),
+            next_reply_seq,
+        );
         return false;
     };
     let seq = json_i64(message.get("seq")).unwrap_or(0);
@@ -462,7 +605,13 @@ fn ingest_record(inner: &ServerInner, stream: &mut TcpStream, message: &Json, fr
         if let Some(existing) = state.ids.get(&event_id) {
             if existing != &record {
                 drop(state);
-                violate_session(inner, stream, &format!("duplicate_contradiction:{event_id}"), Some(frame_key), next_reply_seq);
+                violate_session(
+                    inner,
+                    stream,
+                    &format!("duplicate_contradiction:{event_id}"),
+                    Some(frame_key),
+                    next_reply_seq,
+                );
                 return false;
             }
             let chain_len = state.stored_count;
@@ -471,21 +620,40 @@ fn ingest_record(inner: &ServerInner, stream: &mut TcpStream, message: &Json, fr
             return true;
         }
     }
-    let (mac, chain) = match verify_record(&record, &inner.state.lock().expect("relay state").head, &inner.keyring) {
+    let (mac, chain) = match verify_record(
+        &record,
+        &inner.state.lock().expect("relay state").head,
+        &inner.keyring,
+    ) {
         Ok(value) => value,
         Err(error) => {
-            violate_session(inner, stream, &error.to_string(), Some(frame_key), next_reply_seq);
+            violate_session(
+                inner,
+                stream,
+                &error.to_string(),
+                Some(frame_key),
+                next_reply_seq,
+            );
             return false;
         }
     };
     let line = Json::object([
-        ("chain_prev", Json::string(&inner.state.lock().expect("relay state").head)),
+        (
+            "chain_prev",
+            Json::string(&inner.state.lock().expect("relay state").head),
+        ),
         ("chain_mac", Json::string(&mac)),
         ("chain_hash", Json::string(&chain)),
         ("record", record.clone()),
     ]);
     let Ok(mut encoded) = canonical_bytes(&line) else {
-        violate_session(inner, stream, "record_encode", Some(frame_key), next_reply_seq);
+        violate_session(
+            inner,
+            stream,
+            "record_encode",
+            Some(frame_key),
+            next_reply_seq,
+        );
         return false;
     };
     encoded.push(b'\n');
@@ -494,7 +662,13 @@ fn ingest_record(inner: &ServerInner, stream: &mut TcpStream, message: &Json, fr
         if let Some(existing) = state.ids.get(&event_id) {
             if existing != &record {
                 drop(state);
-                violate_session(inner, stream, &format!("duplicate_contradiction:{event_id}"), Some(frame_key), next_reply_seq);
+                violate_session(
+                    inner,
+                    stream,
+                    &format!("duplicate_contradiction:{event_id}"),
+                    Some(frame_key),
+                    next_reply_seq,
+                );
                 return false;
             }
             let chain_len = state.stored_count;
@@ -518,12 +692,18 @@ fn ingest_record(inner: &ServerInner, stream: &mut TcpStream, message: &Json, fr
     true
 }
 
-fn verify_record(record: &Json, previous: &str, keyring: &KeyRing) -> Result<(String, String), RelayFail> {
-    let payload_bytes = canonical_bytes(record).map_err(|error| RelayFail::Violation(error.message().to_string()))?;
+fn verify_record(
+    record: &Json,
+    previous: &str,
+    keyring: &KeyRing,
+) -> Result<(String, String), RelayFail> {
+    let payload_bytes = canonical_bytes(record)
+        .map_err(|error| RelayFail::Violation(error.message().to_string()))?;
     let mut mac_input = previous.as_bytes().to_vec();
     mac_input.extend_from_slice(&payload_bytes);
     let mac = keyring.mac_audit(&mac_input);
-    let record_text = String::from_utf8(payload_bytes).map_err(|error| RelayFail::Violation(error.to_string()))?;
+    let record_text = String::from_utf8(payload_bytes)
+        .map_err(|error| RelayFail::Violation(error.to_string()))?;
     let chain = sha256_hex(&Json::object([
         ("prev", Json::string(previous)),
         ("record", Json::string(record_text)),
@@ -640,7 +820,12 @@ pub struct AuditRelayClient {
 }
 
 impl AuditRelayClient {
-    pub fn new(audit_path: impl AsRef<Path>, host: impl Into<String>, port: u16, transfer_key: Vec<u8>) -> Self {
+    pub fn new(
+        audit_path: impl AsRef<Path>,
+        host: impl Into<String>,
+        port: u16,
+        transfer_key: Vec<u8>,
+    ) -> Self {
         Self {
             inner: Arc::new(ClientInner {
                 audit_path: audit_path.as_ref().to_path_buf(),
@@ -685,7 +870,13 @@ impl AuditRelayClient {
         if let Some(handle) = self.thread.lock().expect("relay client").take() {
             let _ = handle.join();
         }
-        let already = !self.inner.state.lock().expect("relay client").violation.is_empty();
+        let already = !self
+            .inner
+            .state
+            .lock()
+            .expect("relay client")
+            .violation
+            .is_empty();
         if !already && let Err(error) = session(&self.inner, true) {
             let mut state = self.inner.state.lock().expect("relay client");
             if state.violation.is_empty() {
@@ -697,7 +888,10 @@ impl AuditRelayClient {
     pub fn health(&self) -> Json {
         let state = self.inner.state.lock().expect("relay client");
         Json::object([
-            ("ok", Json::Bool(state.violation.is_empty() && state.last_error.is_empty())),
+            (
+                "ok",
+                Json::Bool(state.violation.is_empty() && state.last_error.is_empty()),
+            ),
             ("connected", Json::Bool(state.connected)),
             ("violation", optional_text(&state.violation)),
             ("error", optional_text(&state.last_error)),
@@ -734,11 +928,22 @@ fn client_loop(inner: Arc<ClientInner>) {
 
 fn session(inner: &ClientInner, one_pass: bool) -> Result<(), RelayFail> {
     let address = format!("{}:{}", inner.host, inner.port);
-    let mut stream = TcpStream::connect_timeout(&address.parse().map_err(|error: std::net::AddrParseError| RelayFail::Io(error.to_string()))?, inner.timeout)
+    let mut stream = TcpStream::connect_timeout(
+        &address
+            .parse()
+            .map_err(|error: std::net::AddrParseError| RelayFail::Io(error.to_string()))?,
+        inner.timeout,
+    )
+    .map_err(|error| RelayFail::Io(error.to_string()))?;
+    stream
+        .set_nodelay(true)
         .map_err(|error| RelayFail::Io(error.to_string()))?;
-    stream.set_nodelay(true).map_err(|error| RelayFail::Io(error.to_string()))?;
-    stream.set_read_timeout(Some(inner.timeout)).map_err(|error| RelayFail::Io(error.to_string()))?;
-    stream.set_write_timeout(Some(inner.timeout)).map_err(|error| RelayFail::Io(error.to_string()))?;
+    stream
+        .set_read_timeout(Some(inner.timeout))
+        .map_err(|error| RelayFail::Io(error.to_string()))?;
+    stream
+        .set_write_timeout(Some(inner.timeout))
+        .map_err(|error| RelayFail::Io(error.to_string()))?;
     let challenge = read_frame(&mut stream)?;
     let Some(challenge_value) = challenge.get("challenge").and_then(Json::as_str) else {
         return Err(RelayFail::Violation(format!("no challenge: {challenge:?}")));
@@ -746,22 +951,25 @@ fn session(inner: &ClientInner, one_pass: bool) -> Result<(), RelayFail> {
     if challenge.get("type").and_then(Json::as_str) != Some("challenge") {
         return Err(RelayFail::Violation(format!("no challenge: {challenge:?}")));
     }
-    if challenge.get("mac").and_then(Json::as_str) != Some(&sign_challenge(&inner.transfer_key, challenge_value)) {
-        return Err(RelayFail::Violation("challenge failed authentication".to_string()));
+    if challenge.get("mac").and_then(Json::as_str)
+        != Some(&sign_challenge(&inner.transfer_key, challenge_value))
+    {
+        return Err(RelayFail::Violation(
+            "challenge failed authentication".to_string(),
+        ));
     }
     let nonce = new_id("relay-");
-    let session_key = derive_session_key(
-        RELAY_PROTOCOL,
-        &inner.transfer_key,
-        challenge_value,
-        &nonce,
-    );
+    let session_key =
+        derive_session_key(RELAY_PROTOCOL, &inner.transfer_key, challenge_value, &nonce);
     let hello = Json::object([
         ("type", Json::string("hello")),
         ("version", Json::string(RELAY_PROTOCOL)),
         ("challenge", Json::string(challenge_value)),
         ("nonce", Json::string(&nonce)),
-        ("mac", Json::string(sign_hello(&inner.transfer_key, &nonce, challenge_value))),
+        (
+            "mac",
+            Json::string(sign_hello(&inner.transfer_key, &nonce, challenge_value)),
+        ),
     ]);
     write_frame(&mut stream, &hello)?;
     let reply = read_frame(&mut stream)?;
@@ -771,9 +979,12 @@ fn session(inner: &ClientInner, one_pass: bool) -> Result<(), RelayFail> {
     {
         return Err(RelayFail::Violation(format!("hello rejected: {reply:?}")));
     }
-    let begin = frame_signed(RELAY_PROTOCOL, &session_key, 1, &Json::object([
-        ("type", Json::string("stream_begin")),
-    ]))
+    let begin = frame_signed(
+        RELAY_PROTOCOL,
+        &session_key,
+        1,
+        &Json::object([("type", Json::string("stream_begin"))]),
+    )
     .map_err(RelayFail::Violation)?;
     write_frame(&mut stream, &begin)?;
     let ready = read_frame(&mut stream)?;
@@ -793,7 +1004,8 @@ fn session(inner: &ClientInner, one_pass: bool) -> Result<(), RelayFail> {
     loop {
         for line in tail_once(inner)? {
             seq += 1;
-            let parsed = loads_strict(&line).map_err(|error| RelayFail::Violation(error.message().to_string()))?;
+            let parsed = loads_strict(&line)
+                .map_err(|error| RelayFail::Violation(error.message().to_string()))?;
             let Some(record) = parsed.get("record").cloned() else {
                 return Err(RelayFail::Violation("record_missing_payload".to_string()));
             };
@@ -801,10 +1013,7 @@ fn session(inner: &ClientInner, one_pass: bool) -> Result<(), RelayFail> {
                 RELAY_PROTOCOL,
                 &session_key,
                 seq,
-                &Json::object([
-                    ("type", Json::string("record")),
-                    ("record", record),
-                ]),
+                &Json::object([("type", Json::string("record")), ("record", record)]),
             )
             .map_err(RelayFail::Violation)?;
             write_frame(&mut stream, &signed)?;
@@ -813,17 +1022,23 @@ fn session(inner: &ClientInner, one_pass: bool) -> Result<(), RelayFail> {
             if !frame_is_authed(&ack, RELAY_PROTOCOL, &session_key)
                 || json_i64(ack.get("seq")) != Some(expected_reply_seq)
             {
-                return Err(RelayFail::Violation("relay ack failed authentication".to_string()));
+                return Err(RelayFail::Violation(
+                    "relay ack failed authentication".to_string(),
+                ));
             }
             if ack.get("type").and_then(Json::as_str) == Some("violation") {
                 let reason = ack.get("reason").and_then(Json::as_str).unwrap_or("");
                 return Err(RelayFail::Violation(format!("relay: {reason}")));
             }
             if json_i64(ack.get("request_seq")) != Some(seq) {
-                return Err(RelayFail::Violation("relay ack request sequence mismatch".to_string()));
+                return Err(RelayFail::Violation(
+                    "relay ack request sequence mismatch".to_string(),
+                ));
             }
             if ack.get("type").and_then(Json::as_str) != Some("ack") {
-                return Err(RelayFail::Violation(format!("unexpected relay reply: {ack:?}")));
+                return Err(RelayFail::Violation(format!(
+                    "unexpected relay reply: {ack:?}"
+                )));
             }
             let mut state = inner.state.lock().expect("relay client");
             if ack.get("dup").and_then(Json::as_bool) == Some(true) {
@@ -847,9 +1062,11 @@ fn tail_once(inner: &ClientInner) -> Result<Vec<String>, RelayFail> {
     };
     let cursor = inner.state.lock().expect("relay client").cursor;
     use std::io::{Seek, SeekFrom};
-    file.seek(SeekFrom::Start(cursor)).map_err(|error| RelayFail::Io(error.to_string()))?;
+    file.seek(SeekFrom::Start(cursor))
+        .map_err(|error| RelayFail::Io(error.to_string()))?;
     let mut data = Vec::new();
-    file.read_to_end(&mut data).map_err(|error| RelayFail::Io(error.to_string()))?;
+    file.read_to_end(&mut data)
+        .map_err(|error| RelayFail::Io(error.to_string()))?;
     if data.is_empty() {
         return Ok(Vec::new());
     }
@@ -861,13 +1078,21 @@ fn tail_once(inner: &ClientInner) -> Result<Vec<String>, RelayFail> {
     };
     let complete = &text[..complete_end];
     inner.state.lock().expect("relay client").cursor = cursor + complete_end as u64;
-    Ok(complete.lines().filter(|line| !line.trim().is_empty()).map(str::to_string).collect())
+    Ok(complete
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 fn write_frame(stream: &mut TcpStream, message: &Json) -> Result<(), RelayFail> {
     let bytes = frame(message)?;
-    stream.write_all(&bytes).map_err(|error| RelayFail::Io(error.to_string()))?;
-    stream.flush().map_err(|error| RelayFail::Io(error.to_string()))
+    stream
+        .write_all(&bytes)
+        .map_err(|error| RelayFail::Io(error.to_string()))?;
+    stream
+        .flush()
+        .map_err(|error| RelayFail::Io(error.to_string()))
 }
 
 fn reply_signed(stream: &mut TcpStream, key: &[u8], seq: i64, message: &Json) {

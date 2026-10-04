@@ -32,7 +32,9 @@ fn start(runtime: &VossRuntime, stall: &str, big_volume: bool) -> Child {
     if big_volume {
         env.push(("VOSS_BIG_VOLUME", "1"));
     }
-    runtime.spawn_worker_with(stall_bin(), &env).expect("stall worker handshake")
+    runtime
+        .spawn_worker_with(stall_bin(), &env)
+        .expect("stall worker handshake")
 }
 
 fn propose_read(runtime: &VossRuntime) -> Json {
@@ -48,7 +50,11 @@ fn number(report: &Json, key: &str) -> f64 {
 }
 
 fn accepts(runtime: &VossRuntime) -> bool {
-    runtime.health_report().get("worker_accepts_work").and_then(Json::as_bool) == Some(true)
+    runtime
+        .health_report()
+        .get("worker_accepts_work")
+        .and_then(Json::as_bool)
+        == Some(true)
 }
 
 fn stop(child: &mut Child, runtime: &VossRuntime) {
@@ -64,10 +70,19 @@ fn fast_exchanges_stay_within_policy() {
     let mut child = start(&runtime, "0", false);
     for _ in 0..2 {
         let response = propose_read(&runtime);
-        assert_eq!(response.get("decision").and_then(Json::as_str), Some("ALLOW"), "{response:?}");
+        assert_eq!(
+            response.get("decision").and_then(Json::as_str),
+            Some("ALLOW"),
+            "{response:?}"
+        );
     }
     let report = runtime.drift_report();
-    assert!(report.get("dimensions").and_then(|dims| dims.get("temporal")).is_some());
+    assert!(
+        report
+            .get("dimensions")
+            .and_then(|dims| dims.get("temporal"))
+            .is_some()
+    );
     assert_eq!(number(&report, "temporal"), 0.0, "{report:?}");
     assert!(accepts(&runtime));
     stop(&mut child, &runtime);
@@ -90,13 +105,20 @@ fn stalled_worker_engages_containment() {
         ("payload", Json::empty_object()),
         ("principal", Json::string(&runtime.worker_principal)),
         ("request_id", Json::string("after-stall")),
-        ("resource", Json::object([("path", Json::string("notes.txt"))])),
+        (
+            "resource",
+            Json::object([("path", Json::string("notes.txt"))]),
+        ),
         ("session_id", Json::string(&runtime.worker_session)),
         ("version", Json::string("1")),
     ]);
     let text = String::from_utf8(canonical_bytes(&follow).unwrap()).unwrap();
     let denied = runtime.handle_envelope(&text);
-    assert_eq!(denied.get("decision").and_then(Json::as_str), Some("DENY"), "{denied:?}");
+    assert_eq!(
+        denied.get("decision").and_then(Json::as_str),
+        Some("DENY"),
+        "{denied:?}"
+    );
     stop(&mut child, &runtime);
 }
 
@@ -108,6 +130,10 @@ fn volume_overflow_registers_anomaly() {
     let _ = propose_read(&runtime);
     let report = runtime.drift_report();
     assert!(number(&report, "temporal") > 0.0, "{report:?}");
-    assert_eq!(report.get("temporal_anomalies").and_then(Json::as_i64), Some(1), "{report:?}");
+    assert_eq!(
+        report.get("temporal_anomalies").and_then(Json::as_i64),
+        Some(1),
+        "{report:?}"
+    );
     stop(&mut child, &runtime);
 }

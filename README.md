@@ -1,5 +1,7 @@
 # Voss Human Sovereign Runtime
 
+[![CI](https://github.com/warheart1984-ctrl/voss-runtime/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/warheart1984-ctrl/voss-runtime/actions/workflows/ci.yml)
+
 A runnable prototype of a **governance engine for model adapters**: it routes
 declared worker actions through a signed, default-deny policy and explicit,
 bound human approval, and records them in an authenticated audit log with a

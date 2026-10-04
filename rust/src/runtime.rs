@@ -18,28 +18,28 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::Duration;
 
+use crate::VERSION;
 use crate::approval::{
-    ApprovalController, ApprovalFlow, STATE_AUTHORIZED, STATE_COMPLETED,
-    STATE_EXECUTING, STATE_PENDING_APPROVAL,
+    ApprovalController, ApprovalFlow, STATE_AUTHORIZED, STATE_COMPLETED, STATE_EXECUTING,
+    STATE_PENDING_APPROVAL,
 };
 use crate::audit::{AuditFields, AuditLog, WAL_SCHEMA, wal_genesis};
 use crate::broker::{Broker, BrokerDecision, Capability, HealthProvider, coarse_reason_code};
 use crate::canonical::{Json, ProtocolError, canonical_bytes, json_number, loads_strict, new_id};
 use crate::chan::{self, ChannelError, ChannelSession, MAX_LINE};
 use crate::confine::WorkerJob;
+use crate::console::ConsoleClient;
 use crate::keys::KeyRing;
 use crate::outbox::OutboxLink;
-use crate::console::ConsoleClient;
 use crate::policy::{
-    DECISION_DENY, DECISION_REQUIRE_APPROVAL, PolicyBundle, PolicyEngine, PolicyFields, PolicyLoader,
-    Rule, build_policy_body, package_policy,
+    DECISION_DENY, DECISION_REQUIRE_APPROVAL, PolicyBundle, PolicyEngine, PolicyFields,
+    PolicyLoader, Rule, build_policy_body, package_policy,
 };
 use crate::protocol::{CanonicalRequest, RequestNormalizer, os_realpath};
 use crate::relay::AuditRelayClient;
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::watchdog::{HealthReport, Watchdog};
 use crate::watchguard::WatchGuardLink;
-use crate::VERSION;
 
 const DRIFT_CONTAIN: f64 = 0.30;
 const DRIFT_FAIL: f64 = 0.50;
@@ -145,7 +145,8 @@ impl VossRuntime {
             .unwrap_or_else(|| Path::new("."))
             .join("wal.jsonl");
         let wal = Arc::new(
-            AuditLog::open_chain(&wal_path, keyring, WAL_SCHEMA, &wal_genesis()?).map_err(audit_error)?,
+            AuditLog::open_chain(&wal_path, keyring, WAL_SCHEMA, &wal_genesis()?)
+                .map_err(audit_error)?,
         );
         let approvals = Arc::new(ApprovalController::with_wal(
             &policy_version,
@@ -195,8 +196,16 @@ impl VossRuntime {
                 if let Some(guard) = guard {
                     let report = guard.health();
                     if !report.ok {
-                        let state = if report.triggered { "triggered" } else { "unreachable" };
-                        let detail = if report.error.is_empty() { state.to_string() } else { report.error };
+                        let state = if report.triggered {
+                            "triggered"
+                        } else {
+                            "unreachable"
+                        };
+                        let detail = if report.error.is_empty() {
+                            state.to_string()
+                        } else {
+                            report.error
+                        };
                         return HealthReport {
                             ok: false,
                             detail: format!("watch-guard {state}: {detail}"),
@@ -305,15 +314,24 @@ impl VossRuntime {
         if claimed != self.worker_principal {
             return self.reject_identity(
                 "claimed principal does not match registered worker",
-                parsed.get("request_id").and_then(Json::as_str).unwrap_or(""),
+                parsed
+                    .get("request_id")
+                    .and_then(Json::as_str)
+                    .unwrap_or(""),
                 parsed.get("action").and_then(Json::as_str).unwrap_or(""),
             );
         }
-        let claimed_session = parsed.get("session_id").and_then(Json::as_str).unwrap_or("");
+        let claimed_session = parsed
+            .get("session_id")
+            .and_then(Json::as_str)
+            .unwrap_or("");
         if claimed_session != self.worker_session {
             return self.reject_identity(
                 "claimed session does not match registered worker session",
-                parsed.get("request_id").and_then(Json::as_str).unwrap_or(""),
+                parsed
+                    .get("request_id")
+                    .and_then(Json::as_str)
+                    .unwrap_or(""),
                 parsed.get("action").and_then(Json::as_str).unwrap_or(""),
             );
         }
@@ -366,6 +384,8 @@ impl VossRuntime {
     }
 
     pub fn kill_worker(&self, reason: &str, terminate_process: bool) -> Json {
+        // Suspend first so no work is accepted once the process starts dying.
+        self.watchdog.suspend(&self.worker_principal, reason);
         if let Some(guard) = self.guard.lock().expect("guard").clone() {
             let _ = guard.terminate(reason);
         }
@@ -381,7 +401,10 @@ impl VossRuntime {
         Json::object([
             ("worker_id", Json::string(report.worker_id)),
             ("reason", Json::string(report.reason)),
-            ("capabilities_revoked", Json::Int(report.capabilities_revoked)),
+            (
+                "capabilities_revoked",
+                Json::Int(report.capabilities_revoked),
+            ),
             ("process_terminated", Json::Bool(report.process_terminated)),
         ])
     }
@@ -451,7 +474,9 @@ impl VossRuntime {
                 let _ = child.wait();
                 let _ = fs::remove_file(&bootstrap_path);
                 *self.bootstrap_path.lock().expect("bootstrap") = None;
-                return Err(ProtocolError::new(format!("worker confinement failed: {error}")));
+                return Err(ProtocolError::new(format!(
+                    "worker confinement failed: {error}"
+                )));
             }
         }
         if let Some(guard) = self.guard.lock().expect("guard").clone() {
@@ -490,9 +515,9 @@ impl VossRuntime {
             ("principal", Json::string(&self.worker_principal)),
         ]);
         let mut link = self.link.lock().expect("channel");
-        let link = link
-            .as_mut()
-            .ok_or_else(|| ProtocolError::new("no authenticated channel: call spawn_worker first"))?;
+        let link = link.as_mut().ok_or_else(|| {
+            ProtocolError::new("no authenticated channel: call spawn_worker first")
+        })?;
         let wire = link
             .channel
             .send("prompt", &request)
@@ -533,9 +558,9 @@ impl VossRuntime {
     pub fn drift_report(&self) -> Json {
         let counters = self.counters.lock().expect("drift lock");
         let window = counters.events.max(10) as f64;
-        let behavioral = (counters.denied_policy + counters.tamper + counters.replay + counters.bypass)
-            as f64
-            / window;
+        let behavioral =
+            (counters.denied_policy + counters.tamper + counters.replay + counters.bypass) as f64
+                / window;
         let schema = counters.schema_violations as f64 / window;
         let identity = counters.identity_violations as f64 / window;
         let temporal_window = counters.exchanges.max(TEMPORAL_MIN_WINDOW) as f64;
@@ -552,7 +577,10 @@ impl VossRuntime {
             ("window", Json::Int(counters.events.max(10) as i64)),
             ("temporal_window", Json::Int(temporal_window as i64)),
             ("exchanges_sampled", Json::Int(counters.exchanges as i64)),
-            ("temporal_anomalies", Json::Int(counters.temporal_anomalies as i64)),
+            (
+                "temporal_anomalies",
+                Json::Int(counters.temporal_anomalies as i64),
+            ),
             (
                 "dimensions",
                 Json::object([
@@ -692,7 +720,10 @@ impl VossRuntime {
                 &decision,
                 &approver_ref,
             );
-            let shown = result.get("decision").and_then(Json::as_str).unwrap_or(decision.as_str());
+            let shown = result
+                .get("decision")
+                .and_then(Json::as_str)
+                .unwrap_or(decision.as_str());
             publisher.publish_result(&flow_id, shown, &approver_ref);
         });
         let watchdog = Arc::clone(&self.watchdog);
@@ -706,6 +737,8 @@ impl VossRuntime {
             } else {
                 format!("operator-console: {reason}")
             };
+            // Suspend first so no work is accepted once the process starts dying.
+            watchdog.suspend(&principal, &detail);
             if let Some(guard) = guard.lock().expect("guard").clone() {
                 let _ = guard.terminate(&detail);
             }
@@ -766,7 +799,8 @@ impl VossRuntime {
         });
         client.start();
         *self.relay.lock().expect("relay") = Some(client);
-        self.relay_ok.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.relay_ok
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn audit_summary(&self) -> Json {
@@ -798,14 +832,28 @@ impl VossRuntime {
                 ),
             ]));
         }
-        let tail = last.into_iter().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail = last
+            .into_iter()
+            .rev()
+            .take(10)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         Json::object([
-            ("path", Json::string(self.audit.path().display().to_string())),
+            (
+                "path",
+                Json::string(self.audit.path().display().to_string()),
+            ),
             ("records", Json::Int(records.len() as i64)),
             ("integrity_ok", Json::Bool(self.audit.verify_integrity())),
             (
                 "by_event_type",
-                Json::object(counts.into_iter().map(|(key, value)| (key, Json::Int(value)))),
+                Json::object(
+                    counts
+                        .into_iter()
+                        .map(|(key, value)| (key, Json::Int(value))),
+                ),
             ),
             ("last", Json::Array(tail)),
         ])
@@ -890,7 +938,8 @@ impl VossRuntime {
             &self.worker_principal,
             &format!("channel {phase} violation"),
         );
-        self.broker.revoke_all(&self.worker_principal, "channel-violation");
+        self.broker
+            .revoke_all(&self.worker_principal, "channel-violation");
     }
 
     fn audit_channel_timeout(&self, phase: &str) {
@@ -1114,7 +1163,8 @@ impl VossRuntime {
         let Some(client) = self.console.lock().expect("console").clone() else {
             return;
         };
-        if decision.decision != DECISION_REQUIRE_APPROVAL || decision.approval_request_id.is_empty() {
+        if decision.decision != DECISION_REQUIRE_APPROVAL || decision.approval_request_id.is_empty()
+        {
             return;
         }
         let flow_id = decision.approval_request_id.clone();
@@ -1183,7 +1233,9 @@ pub fn scrubbed_env() -> Vec<(String, String)> {
 
 fn secret_like(key: &str) -> bool {
     let upper = key.to_ascii_uppercase();
-    ENV_FRAGMENTS.iter().any(|fragment| upper.contains(fragment))
+    ENV_FRAGMENTS
+        .iter()
+        .any(|fragment| upper.contains(fragment))
 }
 
 fn load_or_create_identity(audit_path: &Path) -> Result<(String, String), ProtocolError> {
@@ -1220,7 +1272,11 @@ fn worker_executable() -> Result<PathBuf, ProtocolError> {
         return Ok(PathBuf::from(path));
     }
     let current = std::env::current_exe().map_err(io_error)?;
-    let name = if cfg!(windows) { "worker.exe" } else { "worker" };
+    let name = if cfg!(windows) {
+        "worker.exe"
+    } else {
+        "worker"
+    };
     if let Some(dir) = current.parent() {
         let sibling = dir.join(name);
         if sibling.is_file() {
@@ -1233,7 +1289,9 @@ fn worker_executable() -> Result<PathBuf, ProtocolError> {
             }
         }
     }
-    Err(ProtocolError::new("worker executable was not found beside the runtime"))
+    Err(ProtocolError::new(
+        "worker executable was not found beside the runtime",
+    ))
 }
 
 struct ApprovalHost<'a> {
@@ -1246,7 +1304,12 @@ struct ApprovalHost<'a> {
     session: &'a str,
 }
 
-fn resolve_approval_with(host: &ApprovalHost<'_>, flow_id: &str, decision: &str, approver_ref: &str) -> Json {
+fn resolve_approval_with(
+    host: &ApprovalHost<'_>,
+    flow_id: &str,
+    decision: &str,
+    approver_ref: &str,
+) -> Json {
     let flow = match host.approvals.get(flow_id) {
         Ok(flow) => flow,
         Err(_) => {
@@ -1284,7 +1347,10 @@ fn resolve_approval_with(host: &ApprovalHost<'_>, flow_id: &str, decision: &str,
         if reason == "denied_replay_uniqueness" {
             counters.replay += 1;
         }
-        if result.decision == "DENY" && reason != "denied_health_unavailable" && reason != "denied_approval" {
+        if result.decision == "DENY"
+            && reason != "denied_health_unavailable"
+            && reason != "denied_approval"
+        {
             counters.bypass += 1;
         }
     }
@@ -1292,7 +1358,12 @@ fn resolve_approval_with(host: &ApprovalHost<'_>, flow_id: &str, decision: &str,
     result.to_json()
 }
 
-fn maybe_contain_shared(counters: &Mutex<Counters>, watchdog: &Watchdog, broker: &Broker, principal: &str) {
+fn maybe_contain_shared(
+    counters: &Mutex<Counters>,
+    watchdog: &Watchdog,
+    broker: &Broker,
+    principal: &str,
+) {
     let (idle, score, already) = {
         let counters = counters.lock().expect("drift lock");
         (
@@ -1319,7 +1390,9 @@ fn maybe_contain_shared(counters: &Mutex<Counters>, watchdog: &Watchdog, broker:
 
 fn score_of(counters: &Counters) -> f64 {
     let window = counters.events.max(10) as f64;
-    let behavioral = (counters.denied_policy + counters.tamper + counters.replay + counters.bypass) as f64 / window;
+    let behavioral = (counters.denied_policy + counters.tamper + counters.replay + counters.bypass)
+        as f64
+        / window;
     let schema = counters.schema_violations as f64 / window;
     let identity = counters.identity_violations as f64 / window;
     let temporal_window = counters.exchanges.max(TEMPORAL_MIN_WINDOW) as f64;
@@ -1357,8 +1430,13 @@ fn replay_wal(records: &[Json]) -> Result<Restored, String> {
     let mut caps: BTreeMap<String, Capability> = BTreeMap::new();
     let mut executed = Vec::new();
     for line in records {
-        let record = line.get("record").ok_or("write-ahead ledger inconsistent: missing record")?;
-        let event = record.get("event_type").and_then(Json::as_str).unwrap_or("");
+        let record = line
+            .get("record")
+            .ok_or("write-ahead ledger inconsistent: missing record")?;
+        let event = record
+            .get("event_type")
+            .and_then(Json::as_str)
+            .unwrap_or("");
         match event {
             "flow_request" => {
                 let flow = flow_from_wal(record)?;
@@ -1458,7 +1536,10 @@ fn flow_from_wal(record: &Json) -> Result<ApprovalFlow, String> {
         state: STATE_PENDING_APPROVAL.to_string(),
         approver_ref: String::new(),
         outcome: String::new(),
-        created_at: record.get("created_at").and_then(Json::as_f64).unwrap_or(0.0),
+        created_at: record
+            .get("created_at")
+            .and_then(Json::as_f64)
+            .unwrap_or(0.0),
         request,
     })
 }
@@ -1488,7 +1569,10 @@ fn cap_from_wal(record: &Json) -> Result<Capability, String> {
         nonce: text(record, "nonce")?.to_string(),
         request_id: text(record, "request_id")?.to_string(),
         request_digest: text(record, "request_digest")?.to_string(),
-        issued_at: record.get("issued_at").and_then(Json::as_f64).unwrap_or(0.0),
+        issued_at: record
+            .get("issued_at")
+            .and_then(Json::as_f64)
+            .unwrap_or(0.0),
         expires_at: number(record, "expires_at")?,
         use_limit: record.get("use_limit").and_then(Json::as_i64).unwrap_or(1),
         used_count: 0,
@@ -1587,7 +1671,9 @@ impl LinePump {
         }
         match self.response.recv_timeout(CHANNEL_TIMEOUT) {
             Ok(LineEvent::Line(line)) => Ok(line),
-            Ok(LineEvent::Eof) | Ok(LineEvent::Failed) => Err(ChannelError::new("denied_channel_eof")),
+            Ok(LineEvent::Eof) | Ok(LineEvent::Failed) => {
+                Err(ChannelError::new("denied_channel_eof"))
+            }
             Ok(LineEvent::Oversize) => Err(ChannelError::new("denied_channel_oversize")),
             Err(RecvTimeoutError::Timeout) => Err(ChannelError::new("denied_channel_timeout")),
             Err(RecvTimeoutError::Disconnected) => Err(ChannelError::new("denied_channel_eof")),
@@ -1647,7 +1733,8 @@ fn drain_line(reader: &mut BufReader<ChildStdout>) {
 
 fn random_bytes(len: usize) -> Result<Vec<u8>, ProtocolError> {
     let mut buffer = vec![0u8; len];
-    getrandom::fill(&mut buffer).map_err(|_| ProtocolError::new("channel key generation failed"))?;
+    getrandom::fill(&mut buffer)
+        .map_err(|_| ProtocolError::new("channel key generation failed"))?;
     Ok(buffer)
 }
 

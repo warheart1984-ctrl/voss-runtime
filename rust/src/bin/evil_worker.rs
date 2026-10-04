@@ -82,10 +82,12 @@ fn run() -> i32 {
                 corrupt_mac(&proposal)
             }
             "reply-replay" => valid_hello.clone(),
-            "reply-skip-seq" => match chan::wire_line(&key, &sid, "a2h", 3, "proposal", &empty_proposal()) {
-                Ok(line) => line,
-                Err(_) => return 3,
-            },
+            "reply-skip-seq" => {
+                match chan::wire_line(&key, &sid, "a2h", 3, "proposal", &empty_proposal()) {
+                    Ok(line) => line,
+                    Err(_) => return 3,
+                }
+            }
             "reply-wrong-direction" => {
                 let msg = Json::object([
                     ("prompt", Json::string("")),

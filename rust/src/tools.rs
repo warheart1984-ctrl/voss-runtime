@@ -81,11 +81,12 @@ impl ToolContext {
     ) -> Result<Self, ToolFailure> {
         let workspace_root = os_realpath(workspace_root.as_ref())
             .map_err(|error| ToolFailure::new(error.message()))?;
-        let outbox_dir = os_realpath(outbox_dir.as_ref()).or_else(|_| {
-            fs::create_dir_all(outbox_dir.as_ref()).ok();
-            os_realpath(outbox_dir.as_ref())
-        })
-        .map_err(|error| ToolFailure::new(error.message()))?;
+        let outbox_dir = os_realpath(outbox_dir.as_ref())
+            .or_else(|_| {
+                fs::create_dir_all(outbox_dir.as_ref()).ok();
+                os_realpath(outbox_dir.as_ref())
+            })
+            .map_err(|error| ToolFailure::new(error.message()))?;
         fs::create_dir_all(&workspace_root).map_err(|error| ToolFailure::new(error.to_string()))?;
         fs::create_dir_all(&outbox_dir).map_err(|error| ToolFailure::new(error.to_string()))?;
         Ok(Self {
@@ -98,7 +99,9 @@ impl ToolContext {
     pub fn read(&self, request: &CanonicalRequest) -> Result<Json, ToolFailure> {
         let path = self.workspace_file(request)?;
         let limit = max_bytes(request);
-        let bytes = fs::read(&path).map_err(|error| ToolFailure::new(format!("cannot read {}: {error}", path.display())))?;
+        let bytes = fs::read(&path).map_err(|error| {
+            ToolFailure::new(format!("cannot read {}: {error}", path.display()))
+        })?;
         if bytes.len() as i64 > limit {
             return Err(ToolFailure::new(format!(
                 "file exceeds size constraint ({} > {limit})",
@@ -122,16 +125,19 @@ impl ToolContext {
             .as_object()
             .ok_or_else(|| ToolFailure::new("write content must be a string"))?;
         if payload.keys().any(|key| key != "content") {
-            let extra: Vec<&String> = payload.keys().filter(|key| key.as_str() != "content").collect();
+            let extra: Vec<&String> = payload
+                .keys()
+                .filter(|key| key.as_str() != "content")
+                .collect();
             return Err(ToolFailure::new(format!(
                 "unexpected write payload fields: {extra:?}"
             )));
         }
-        let content = payload
+        let content = payload.get("content").and_then(Json::as_str).unwrap_or("");
+        if payload
             .get("content")
-            .and_then(Json::as_str)
-            .unwrap_or("");
-        if payload.get("content").is_some_and(|value| value.as_str().is_none()) {
+            .is_some_and(|value| value.as_str().is_none())
+        {
             return Err(ToolFailure::new("write content must be a string"));
         }
         let data = content.as_bytes();
@@ -148,10 +154,12 @@ impl ToolContext {
         fs::create_dir_all(parent).map_err(|error| ToolFailure::new(error.to_string()))?;
         let temporary = PathBuf::from(format!("{}.part-{}", path.display(), new_id("")));
         {
-            let mut file = fs::File::create(&temporary)
-                .map_err(|error| ToolFailure::new(format!("cannot write {}: {error}", path.display())))?;
-            file.write_all(data)
-                .map_err(|error| ToolFailure::new(format!("cannot write {}: {error}", path.display())))?;
+            let mut file = fs::File::create(&temporary).map_err(|error| {
+                ToolFailure::new(format!("cannot write {}: {error}", path.display()))
+            })?;
+            file.write_all(data).map_err(|error| {
+                ToolFailure::new(format!("cannot write {}: {error}", path.display()))
+            })?;
         }
         fs::rename(&temporary, &path).map_err(|error| {
             let _ = fs::remove_file(&temporary);
@@ -175,15 +183,16 @@ impl ToolContext {
             .get("recipient")
             .and_then(Json::as_str)
             .ok_or_else(|| ToolError::Failure(ToolFailure::new("invalid recipient")))?;
-        let payload = request
-            .payload
-            .as_object()
-            .ok_or_else(|| ToolError::Failure(ToolFailure::new("unexpected send payload fields: []")))?;
+        let payload = request.payload.as_object().ok_or_else(|| {
+            ToolError::Failure(ToolFailure::new("unexpected send payload fields: []"))
+        })?;
         if payload
             .keys()
             .any(|key| key != "subject" && key != "body" && key != "simulate_uncertain")
         {
-            return Err(ToolError::Failure(ToolFailure::new("unexpected send payload fields")));
+            return Err(ToolError::Failure(ToolFailure::new(
+                "unexpected send payload fields",
+            )));
         }
         if payload.get("simulate_uncertain").and_then(Json::as_bool) == Some(true) {
             return Err(ToolError::Uncertain(UncertainOutcome::new(
@@ -215,7 +224,9 @@ impl ToolContext {
         let path = self.outbox_dir.join(format!("{effect_id}.json"));
         let text = canonical_text(&effect).map_err(ToolError::Failure)?;
         fs::write(&path, text).map_err(|error| {
-            ToolError::Failure(ToolFailure::new(format!("cannot record external event: {error}")))
+            ToolError::Failure(ToolFailure::new(format!(
+                "cannot record external event: {error}"
+            )))
         })?;
         Ok(Json::object([
             ("effect_id", Json::string(effect_id)),
@@ -232,7 +243,8 @@ impl ToolContext {
             .get("path")
             .and_then(Json::as_str)
             .ok_or_else(|| ToolFailure::new("resource path must be a non-empty string"))?;
-        resolve_within_root(path, &self.workspace_root).map_err(|error| ToolFailure::new(error.message()))
+        resolve_within_root(path, &self.workspace_root)
+            .map_err(|error| ToolFailure::new(error.message()))
     }
 }
 
@@ -293,7 +305,13 @@ fn deliver_via_accounting(
         .map_err(|error| ToolError::Failure(ToolFailure::new(error.message())))?;
     let recipient_sha = sha256_hex(&Json::object([("recipient", Json::string(recipient))]))
         .map_err(|error| ToolError::Failure(ToolFailure::new(error.message())))?;
-    let ack = match link.deliver(&new_id("dlv-"), "mail", recipient, &payload_digest, &request.request_id) {
+    let ack = match link.deliver(
+        &new_id("dlv-"),
+        "mail",
+        recipient,
+        &payload_digest,
+        &request.request_id,
+    ) {
         Ok(ack) => ack,
         Err(OutboxError::Uncertain(message)) => {
             return Err(ToolError::Uncertain(UncertainOutcome::new(format!(
@@ -326,7 +344,10 @@ fn max_bytes(request: &CanonicalRequest) -> i64 {
 
 fn contained(path: &Path, root: &Path) -> bool {
     let path = norm(path);
-    let root = norm(root).trim_end_matches('\\').trim_end_matches('/').to_string();
+    let root = norm(root)
+        .trim_end_matches('\\')
+        .trim_end_matches('/')
+        .to_string();
     path == root || path.starts_with(&format!("{root}\\")) || path.starts_with(&format!("{root}/"))
 }
 

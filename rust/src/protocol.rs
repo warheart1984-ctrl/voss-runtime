@@ -65,7 +65,12 @@ impl CanonicalRequest {
                 "binding fields (nonce, expiry) are not set",
             ));
         }
-        approval_binding_digest(&self.digest()?, policy_version, &self.nonce, self.expires_at)
+        approval_binding_digest(
+            &self.digest()?,
+            policy_version,
+            &self.nonce,
+            self.expires_at,
+        )
     }
 }
 

@@ -8,7 +8,7 @@ use std::process::Command;
 
 use voss::canonical::{Json, canonical_bytes, new_id};
 use voss::keys::KeyRing;
-use voss::runtime::{retain_env, VossRuntime};
+use voss::runtime::{VossRuntime, retain_env};
 
 fn runtime_in(root: &std::path::Path) -> VossRuntime {
     let workspace = root.join("workspace");
@@ -47,7 +47,11 @@ fn envelope(
 }
 
 fn text(value: &Json, key: &str) -> String {
-    value.get(key).and_then(Json::as_str).unwrap_or("").to_string()
+    value
+        .get(key)
+        .and_then(Json::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 #[test]
@@ -67,7 +71,10 @@ fn policy_allow_read_and_gated_write_redact_audit() {
     let response = runtime.handle_envelope(&read);
     assert_eq!(text(&response, "decision"), "ALLOW");
     assert_eq!(
-        response.get("result").and_then(|result| result.get("content")).and_then(Json::as_str),
+        response
+            .get("result")
+            .and_then(|result| result.get("content"))
+            .and_then(Json::as_str),
         Some("Meeting notes\n")
     );
 
@@ -85,10 +92,17 @@ fn policy_allow_read_and_gated_write_redact_audit() {
     let flow = text(&gated, "approval_request_id");
     let resolved = runtime.resolve_approval(&flow, "APPROVE", "operator@test");
     assert_eq!(text(&resolved, "decision"), "ALLOW");
-    let draft = fs::read_to_string(runtime.workspace_root.join("drafts").join("update.md")).unwrap();
+    let draft =
+        fs::read_to_string(runtime.workspace_root.join("drafts").join("update.md")).unwrap();
     assert!(draft.contains("Draft update"));
     assert!(!runtime.audit_text().contains("Draft update"));
-    assert!(runtime.audit_summary().get("integrity_ok").and_then(Json::as_bool) == Some(true));
+    assert!(
+        runtime
+            .audit_summary()
+            .get("integrity_ok")
+            .and_then(Json::as_bool)
+            == Some(true)
+    );
     runtime.close();
     let _ = fs::remove_dir_all(root);
 }
@@ -114,10 +128,23 @@ fn mock_send_uncertain_unknown_tools_and_identity() {
     );
     let gated = runtime.handle_envelope(&send);
     assert_eq!(text(&gated, "decision"), "REQUIRE_APPROVAL");
-    let sent = runtime.resolve_approval(&text(&gated, "approval_request_id"), "APPROVE", "operator@test");
+    let sent = runtime.resolve_approval(
+        &text(&gated, "approval_request_id"),
+        "APPROVE",
+        "operator@test",
+    );
     assert_eq!(text(&sent, "decision"), "ALLOW");
-    assert!(sent.get("result").and_then(|result| result.get("recipient")).is_none());
-    assert!(sent.get("result").and_then(|result| result.get("recipient_sha256")).and_then(Json::as_str).is_some());
+    assert!(
+        sent.get("result")
+            .and_then(|result| result.get("recipient"))
+            .is_none()
+    );
+    assert!(
+        sent.get("result")
+            .and_then(|result| result.get("recipient_sha256"))
+            .and_then(Json::as_str)
+            .is_some()
+    );
     assert_eq!(fs::read_dir(&runtime.outbox_dir).unwrap().count(), 1);
 
     let uncertain = envelope(
@@ -137,7 +164,11 @@ fn mock_send_uncertain_unknown_tools_and_identity() {
         Json::object([("send_once", Json::Bool(true))]),
     );
     let pending = runtime.handle_envelope(&uncertain);
-    let unknown = runtime.resolve_approval(&text(&pending, "approval_request_id"), "APPROVE", "operator@test");
+    let unknown = runtime.resolve_approval(
+        &text(&pending, "approval_request_id"),
+        "APPROVE",
+        "operator@test",
+    );
     assert_eq!(text(&unknown, "decision"), "UNKNOWN");
     assert_eq!(text(&unknown, "reason_code"), "unknown");
     assert_eq!(fs::read_dir(&runtime.outbox_dir).unwrap().count(), 1);
@@ -221,7 +252,13 @@ fn traversal_replay_and_audit_tamper() {
     assert_eq!(text(&replay, "decision"), "DENY");
     assert_eq!(text(&replay, "reason_code"), "denied_replay");
 
-    assert!(runtime.audit_summary().get("integrity_ok").and_then(Json::as_bool) == Some(true));
+    assert!(
+        runtime
+            .audit_summary()
+            .get("integrity_ok")
+            .and_then(Json::as_bool)
+            == Some(true)
+    );
     let path = root.join("audit.jsonl");
     let mut bytes = fs::read(&path).unwrap();
     if let Some(byte) = bytes.iter_mut().find(|byte| **byte == b'a') {
@@ -239,7 +276,13 @@ fn traversal_replay_and_audit_tamper() {
     // Re-open with the same process is not possible after close; verify the
     // flipped file by opening a log through the public summary of a runtime
     // that still holds the original key. The original runtime is still open.
-    assert!(!runtime.audit_summary().get("integrity_ok").and_then(Json::as_bool).unwrap());
+    assert!(
+        !runtime
+            .audit_summary()
+            .get("integrity_ok")
+            .and_then(Json::as_bool)
+            .unwrap()
+    );
     drop(reopened);
     runtime.close();
     let _ = fs::remove_dir_all(root);
@@ -299,14 +342,29 @@ fn scrubbed_env_drops_secret_like_names() {
     let names: Vec<_> = cleaned.into_iter().map(|(key, _)| key).collect();
     assert!(names.contains(&"PATH".to_string()));
     assert!(names.contains(&"SAFE_VAR".to_string()));
-    assert!(!names.iter().any(|name| name.contains("SECRET") || name.contains("CRED") || name.contains("PASS")));
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.contains("SECRET") || name.contains("CRED") || name.contains("PASS"))
+    );
 }
 
 #[test]
 fn worker_binary_proposes_without_effects_and_hides_secrets() {
     let worker = std::env::var("CARGO_BIN_EXE_worker").expect("worker binary");
-    let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/worker.rs")).unwrap();
-    for banned in ["broker", "policy", "keys", "audit", "tools", "socket", "subprocess", "approval", "watchdog"] {
+    let source =
+        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/worker.rs")).unwrap();
+    for banned in [
+        "broker",
+        "policy",
+        "keys",
+        "audit",
+        "tools",
+        "socket",
+        "subprocess",
+        "approval",
+        "watchdog",
+    ] {
         assert!(!source.contains(&format!("voss::{banned}")), "{banned}");
         assert!(!source.contains(&format!("mod {banned}")), "{banned}");
     }
@@ -322,9 +380,16 @@ fn worker_binary_proposes_without_effects_and_hides_secrets() {
         .env("VOSS_WORKSPACE", root.join("workspace"))
         .output()
         .unwrap();
-    assert!(report.status.success(), "{}", String::from_utf8_lossy(&report.stderr));
+    assert!(
+        report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report.stderr)
+    );
     let text = String::from_utf8(report.stdout).unwrap();
-    assert!(text.contains("\"found_secret_like_env_names\":[]"), "{text}");
+    assert!(
+        text.contains("\"found_secret_like_env_names\":[]"),
+        "{text}"
+    );
 
     let refused = Command::new(&worker)
         .env_clear()
@@ -335,7 +400,12 @@ fn worker_binary_proposes_without_effects_and_hides_secrets() {
         .stderr(std::process::Stdio::piped())
         .output()
         .unwrap();
-    assert_eq!(refused.status.code(), Some(2), "{}", String::from_utf8_lossy(&refused.stderr));
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
 
     let runtime = runtime_in(&root);
     let mut child = runtime.spawn_worker().expect("authenticated worker");

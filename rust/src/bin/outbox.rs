@@ -21,7 +21,9 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let port = argument("--port").and_then(|value| value.parse::<u16>().ok()).unwrap_or(0);
+    let port = argument("--port")
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(0);
     let transfer_key = match hex::decode(transfer_key.trim()) {
         Ok(key) => key,
         Err(error) => {
@@ -29,7 +31,13 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let server = match OutboxServer::bind(&store, transfer_key, flag("--drop-ack"), flag("--refuse"), port) {
+    let server = match OutboxServer::bind(
+        &store,
+        transfer_key,
+        flag("--drop-ack"),
+        flag("--refuse"),
+        port,
+    ) {
         Ok(server) => server,
         Err(error) => {
             eprintln!("{error}");
