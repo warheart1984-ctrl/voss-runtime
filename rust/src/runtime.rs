@@ -384,6 +384,8 @@ impl VossRuntime {
     }
 
     pub fn kill_worker(&self, reason: &str, terminate_process: bool) -> Json {
+        // Suspend first so no work is accepted once the process starts dying.
+        self.watchdog.suspend(&self.worker_principal, reason);
         if let Some(guard) = self.guard.lock().expect("guard").clone() {
             let _ = guard.terminate(reason);
         }
@@ -735,6 +737,8 @@ impl VossRuntime {
             } else {
                 format!("operator-console: {reason}")
             };
+            // Suspend first so no work is accepted once the process starts dying.
+            watchdog.suspend(&principal, &detail);
             if let Some(guard) = guard.lock().expect("guard").clone() {
                 let _ = guard.terminate(&detail);
             }
