@@ -321,3 +321,39 @@ fn recovery_events_in_audit() {
     restarted.close();
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn suspended_worker_is_refused() {
+    let root = std::env::temp_dir().join(format!("voss-suspend-{}", new_id("")));
+    let runtime = open_runtime(&root);
+    let mut worker = runtime.spawn_worker().unwrap();
+    assert!(worker.try_wait().unwrap().is_none(), "worker must be live");
+    assert!(runtime.watchdog.accepts_work(&runtime.worker_principal));
+
+    runtime
+        .watchdog
+        .suspend(&runtime.worker_principal, "test: suspend without kill");
+
+    assert!(
+        worker.try_wait().unwrap().is_none(),
+        "suspend must not kill the process"
+    );
+    assert!(!runtime.watchdog.accepts_work(&runtime.worker_principal));
+    let probe = envelope(
+        &runtime,
+        "req-suspended",
+        "workspace.write",
+        Json::object([("path", Json::string("draft.txt"))]),
+        Json::object([("content", Json::string("nope"))]),
+        Json::empty_object(),
+    );
+    let denied = runtime.handle_envelope(&probe);
+    assert_eq!(text(&denied, "decision"), "DENY");
+    assert_eq!(text(&denied, "reason_code"), "denied_worker_suspended");
+    assert!(!runtime.workspace_root.join("draft.txt").exists());
+
+    let _ = worker.kill();
+    let _ = worker.wait();
+    runtime.close();
+    let _ = fs::remove_dir_all(root);
+}
